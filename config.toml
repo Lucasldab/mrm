@@ -1,5 +1,5 @@
-[sources.asura]
-base_url = "https://asuracomic.net"
+[sources.mangadex]
+base_url = "https://api.mangadex.org"
 enabled = true
 
 [sources.mangack]
