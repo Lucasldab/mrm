@@ -1,0 +1,5 @@
+mrm.db
+scraper/.venv/
+__pycache__/
+*.pyc
+.env

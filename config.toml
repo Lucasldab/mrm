@@ -1,0 +1,14 @@
+[sources.asura]
+base_url = "https://asuracomic.net"
+enabled = true
+
+[sources.mangack]
+base_url = "https://mangack.com"
+enabled = true
+
+[notifications]
+enabled = true
+poll_interval_minutes = 30
+
+[db]
+path = "mrm.db"
