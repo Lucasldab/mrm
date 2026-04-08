@@ -26,3 +26,4 @@ notify-rust = { version = "4", features = ["z"] }
 regex      = "1"
 tempfile   = "3"
 tracing    = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
