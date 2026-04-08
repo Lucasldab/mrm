@@ -30,25 +30,57 @@ use types::AppEvent;
 // ---------------------------------------------------------------------------
 
 fn db_path() -> String {
+    // Check config.toml first for an explicit path
+    let config_path = config_file_path();
+    let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if let Ok(contents) = std::fs::read_to_string(&config_path) {
+        if let Ok(config) = toml::from_str::<toml::Value>(&contents) {
+            if let Some(path) = config.get("db").and_then(|d| d.get("path")).and_then(|p| p.as_str()) {
+                if !path.is_empty() {
+                    let db = PathBuf::from(path);
+                    // Resolve relative paths against the config file's directory
+                    let resolved = if db.is_absolute() { db } else { config_dir.join(&db) };
+                    if resolved.exists() {
+                        return resolved.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        }
+    }
+
+    // Search common locations
+    let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
-        PathBuf::from("mrm.db"),
-        PathBuf::from("../../mrm.db"),
-        dirs_next(),
+        PathBuf::from("mrm.db"),                                          // CWD
+        PathBuf::from(&home).join(".config/mrm/mrm.db"),                  // XDG config
+        PathBuf::from(&home).join(".local/share/mrm/mrm.db"),             // XDG data
+        PathBuf::from("../../mrm.db"),                                    // dev: from crates/mrm/
     ];
     for p in &candidates {
         if p.exists() {
             return p.to_string_lossy().into_owned();
         }
     }
-    "mrm.db".into()
+
+    // Default: create in XDG config dir
+    let default_dir = PathBuf::from(&home).join(".config/mrm");
+    let _ = std::fs::create_dir_all(&default_dir);
+    default_dir.join("mrm.db").to_string_lossy().into_owned()
 }
 
-fn dirs_next() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/mrm/mrm.db")
-    } else {
-        PathBuf::from("mrm.db")
+/// Find config.toml: CWD first, then ~/.config/mrm/
+fn config_file_path() -> PathBuf {
+    let local = PathBuf::from("config.toml");
+    if local.exists() {
+        return local;
     }
+    if let Ok(home) = std::env::var("HOME") {
+        let xdg = PathBuf::from(home).join(".config/mrm/config.toml");
+        if xdg.exists() {
+            return xdg;
+        }
+    }
+    local // fallback to CWD (will fail gracefully)
 }
 
 // ---------------------------------------------------------------------------

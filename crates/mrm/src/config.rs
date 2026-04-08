@@ -265,13 +265,27 @@ impl ThemeConfig {
 // Loader
 // ---------------------------------------------------------------------------
 
-/// Load config from `config.toml` in the current working directory.
-/// Returns an error with context if the file is missing or malformed.
+/// Load config from config.toml, searching CWD then ~/.config/mrm/.
 pub fn load_config() -> Result<Config> {
-    let path = "config.toml";
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file: {path}"))?;
+    let path = find_config_path()
+        .with_context(|| "config.toml not found in CWD or ~/.config/mrm/")?;
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
     let config: Config = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse config file: {path}"))?;
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
     Ok(config)
+}
+
+fn find_config_path() -> Option<std::path::PathBuf> {
+    let local = std::path::PathBuf::from("config.toml");
+    if local.exists() {
+        return Some(local);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let xdg = std::path::PathBuf::from(home).join(".config/mrm/config.toml");
+        if xdg.exists() {
+            return Some(xdg);
+        }
+    }
+    None
 }
