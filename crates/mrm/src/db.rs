@@ -276,8 +276,19 @@ pub async fn upsert_chapters(
     let mut new_count = 0usize;
 
     for ch in chapters {
-        // Upsert the chapter row; RETURNING gives us the row id.
-        let row = sqlx::query(
+        // Check if this chapter already exists before upserting.
+        let already_exists: bool = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM chapter WHERE manhwa_id = ? AND number = ?)",
+        )
+        .bind(manhwa_id)
+        .bind(ch.number)
+        .fetch_one(pool)
+        .await?
+        .try_get::<bool, _>(0)
+        .unwrap_or(false);
+
+        // Upsert the chapter row.
+        sqlx::query(
             r#"
             INSERT INTO chapter (manhwa_id, number, title, url, released_at)
             VALUES (?, ?, ?, ?, ?)
@@ -285,7 +296,6 @@ pub async fn upsert_chapters(
                 title       = excluded.title,
                 url         = excluded.url,
                 released_at = excluded.released_at
-            RETURNING id
             "#,
         )
         .bind(manhwa_id)
@@ -293,22 +303,10 @@ pub async fn upsert_chapters(
         .bind(&ch.title)
         .bind(&ch.url)
         .bind(&ch.released_at)
-        .fetch_one(pool)
+        .execute(pool)
         .await?;
 
-        let chapter_id: i64 = row.try_get("id")?;
-
-        // A chapter is "new" if the user has no progress record for it.
-        let has_progress: bool = sqlx::query(
-            "SELECT EXISTS(SELECT 1 FROM progress WHERE chapter_id = ?)",
-        )
-        .bind(chapter_id)
-        .fetch_one(pool)
-        .await?
-        .try_get::<bool, _>(0)
-        .unwrap_or(false);
-
-        if !has_progress {
+        if !already_exists {
             new_count += 1;
         }
     }
@@ -329,6 +327,28 @@ pub async fn start_chapter(pool: &SqlitePool, chapter_id: i64) -> Result<()> {
         "#,
     )
     .bind(chapter_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Mark all chapters for a manhwa as read (insert progress rows with completed_at).
+/// Used when the user sets status to "Up to Date".
+pub async fn mark_all_chapters_read(pool: &SqlitePool, manhwa_id: i64) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO progress (chapter_id, started_at, scrolled_pct, completed_at)
+        SELECT c.id, CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP
+        FROM chapter c
+        WHERE c.manhwa_id = ?
+          AND c.id NOT IN (SELECT chapter_id FROM progress WHERE completed_at IS NOT NULL)
+        ON CONFLICT(chapter_id) DO UPDATE SET
+            scrolled_pct = 1.0,
+            completed_at = COALESCE(progress.completed_at, CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(manhwa_id)
     .execute(pool)
     .await?;
 

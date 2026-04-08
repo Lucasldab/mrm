@@ -48,23 +48,20 @@ pub async fn coordinator_task(
     let interval_secs = config.notifications.poll_interval_minutes * 60;
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick so the first real poll happens after the interval.
+    // This prevents spurious notifications on every app startup.
+    interval.tick().await;
 
     // Build the scraper registry once — reuse reqwest::Client across all polls.
     let registry = build_registry(&config);
 
-    eprintln!("mrm: coordinator started — polling every {} minutes",
-              config.notifications.poll_interval_minutes);
-
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
-                eprintln!("mrm: coordinator shutting down");
                 break;
             }
             _ = interval.tick() => {
-                if let Err(e) = poll_all(&pool, &config, &registry, &scraper_tx).await {
-                    eprintln!("mrm: poll error: {e}");
-                }
+                let _ = poll_all(&pool, &config, &registry, &scraper_tx).await;
             }
         }
     }

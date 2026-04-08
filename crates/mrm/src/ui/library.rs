@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use ratatui_image::StatefulImage;
@@ -10,21 +10,28 @@ use ratatui_image::StatefulImage;
 use crate::app::App;
 use crate::types::Status;
 
+// Each grid cell: cover image + title + status line
+const CELL_WIDTH: u16 = 22;  // columns per cell
+const CELL_HEIGHT: u16 = 16; // rows per cell (image area + 2 text lines)
+const IMG_WIDTH: u16 = 18;   // image width within cell (centered)
+const IMG_HEIGHT: u16 = 12;  // fixed image height
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.size();
 
-    // Split: main list | right sidebar (keybinds)
+    // Split: main grid | right sidebar (keybinds)
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(26)])
+        .constraints([Constraint::Min(0), Constraint::Length(22)])
         .split(area);
 
-    // Split left: search bar (if active) | list | status bar
+    // Split left: search bar (if active) | grid | status bar
     let search_height = if app.search_active || !app.search_query.is_empty() { 3 } else { 0 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(search_height),
+            Constraint::Length(1), // title bar
             Constraint::Min(0),
             Constraint::Length(1),
         ])
@@ -39,20 +46,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(search, rows[0]);
     }
 
-    // Split list area into cover preview + list
-    let preview_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(10), Constraint::Min(0)])
-        .split(rows[1]);
+    // Title bar
+    let visible = app.visible_manhwa();
+    let title = if app.search_query.is_empty() {
+        format!(" mrm — {} manhwa ", visible.len())
+    } else {
+        format!(" mrm — {} results ", visible.len())
+    };
+    let title_bar = Paragraph::new(title)
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    f.render_widget(title_bar, rows[1]);
 
-    // Left: cover preview for selected manhwa
-    draw_cover_preview(f, app, preview_cols[0]);
-
-    // Right: manhwa list
-    draw_list(f, app, preview_cols[1]);
+    // Grid area
+    draw_grid(f, app, rows[2]);
 
     // Bottom status bar
-    draw_statusbar(f, app, rows[2]);
+    draw_statusbar(f, app, rows[3]);
 
     // Right sidebar: keybinds
     draw_keybinds(f, cols[1]);
@@ -63,138 +72,199 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_list(f: &mut Frame, app: &App, area: Rect) {
-    let visible = app.visible_manhwa();
-    let is_empty = visible.is_empty();
-
-    let items: Vec<ListItem> = if is_empty {
-        vec![ListItem::new(Line::from(Span::styled(
-            "  No manhwa yet. Add one with 'a'.",
-            Style::default().fg(Color::DarkGray),
-        )))]
-    } else {
-        visible
-            .iter()
-            .map(|m| {
-                let status_display = m.status_display();
-
-                // Color-code by status
-                let status_color = match &m.status {
-                    Status::LookedInto => Color::Gray,
-                    Status::Reading    => Color::Green,
-                    Status::UpToDate   => Color::Cyan,
-                    Status::Paused     => Color::Yellow,
-                    Status::Completed  => Color::Blue,
-                    Status::Dropped    => Color::DarkGray,
-                };
-
-                // Show unread badge in orange if there are unread chapters
-                let unread_span = if m.unread > 0 {
-                    Span::styled(
-                        format!(" [{}] ", m.unread),
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::raw("  ")
-                };
-
-                let source_span = Span::styled(
-                    format!("[{}] ", m.source),
-                    Style::default().fg(Color::DarkGray),
-                );
-
-                let title_span = Span::styled(
-                    m.title.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                );
-
-                let status_span = Span::styled(
-                    format!("  {}", status_display),
-                    Style::default().fg(status_color),
-                );
-
-                ListItem::new(Line::from(vec![
-                    unread_span,
-                    source_span,
-                    title_span,
-                    status_span,
-                ]))
-            })
-            .collect()
-    };
-
-    let title = if app.search_query.is_empty() {
-        format!(" mrm — {} manhwa ", visible.len())
-    } else {
-        format!(" mrm — {} results ", visible.len())
-    };
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::White)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let mut state = ListState::default();
-    if !is_empty {
-        state.select(Some(app.library_sel));
-    }
-
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_cover_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
+fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width < CELL_WIDTH || area.height < CELL_HEIGHT {
+        let msg = Paragraph::new("Terminal too small")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
         return;
     }
 
-    let visible = app.visible_manhwa();
-    let selected = visible.get(app.library_sel).copied();
-
-    if let Some(manhwa) = selected {
-        let manhwa_id = manhwa.id;
-        let cover_url = manhwa.cover_url.clone();
-
-        // Ensure the cover is loaded from disk cache
-        app.cover_cache.ensure_loaded(manhwa_id, cover_url.as_deref());
-
-        // Get or create the protocol for this cover
-        if let Some(protocol) = app.get_cover_protocol(manhwa_id) {
-            let image_widget = StatefulImage::new(None);
-            f.render_stateful_widget(image_widget, inner, protocol);
-            return;
-        }
+    let total = app.visible_manhwa().len();
+    if total == 0 {
+        let msg = Paragraph::new("No manhwa yet. Press 'a' to add one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
+        return;
     }
 
-    // No cover available — show placeholder
+    let grid_cols = (area.width / CELL_WIDTH).max(1) as usize;
+    let grid_rows = (area.height / CELL_HEIGHT).max(1) as usize;
+    app.grid_cols = grid_cols;
+
+    let sel = app.library_sel.min(total.saturating_sub(1));
+
+    // Compute scroll offset so the selected item is visible
+    let sel_row = sel / grid_cols;
+    let total_rows = (total + grid_cols - 1) / grid_cols;
+
+    // We store scroll state as a simple row offset
+    let scroll_row = if sel_row < grid_rows / 2 {
+        0
+    } else if sel_row + grid_rows / 2 >= total_rows {
+        total_rows.saturating_sub(grid_rows)
+    } else {
+        sel_row.saturating_sub(grid_rows / 2)
+    };
+
+    // Render each visible cell
+    for vis_row in 0..grid_rows {
+        let data_row = scroll_row + vis_row;
+        for col in 0..grid_cols {
+            let idx = data_row * grid_cols + col;
+            if idx >= total {
+                break;
+            }
+
+            let cell_x = area.x + (col as u16) * CELL_WIDTH;
+            let cell_y = area.y + (vis_row as u16) * CELL_HEIGHT;
+
+            // Clamp to area bounds
+            if cell_x + CELL_WIDTH > area.x + area.width
+                || cell_y + CELL_HEIGHT > area.y + area.height
+            {
+                continue;
+            }
+
+            let cell_area = Rect::new(cell_x, cell_y, CELL_WIDTH, CELL_HEIGHT);
+            let is_selected = idx == sel;
+
+            draw_cell(f, app, cell_area, idx, is_selected);
+        }
+    }
+}
+
+fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: bool) {
+    // Collect needed data before mutably borrowing app for cover rendering
+    let manhwa_data = {
+        let visible = app.visible_manhwa();
+        visible.get(idx).map(|m| (m.id, m.title.clone(), m.cover_url.clone(), m.status.clone(), m.unread, m.status_display()))
+    };
+    let (manhwa_id, title, cover_url, status, unread, status_display) = match manhwa_data {
+        Some(d) => d,
+        None => return,
+    };
+
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+
+    // Selected cell gets a yellow border
+    if is_selected {
+        let border = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        f.render_widget(border, area);
+    }
+
+    // Content area (inside border for selected, full area for unselected)
+    let content = if is_selected {
+        Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
+    } else {
+        area
+    };
+    if content.width < 3 || content.height < 4 { return; }
+
+    // Center image horizontally within content
+    let img_w = IMG_WIDTH.min(content.width);
+    let img_h = IMG_HEIGHT.min(content.height.saturating_sub(2));
+    let img_x = content.x + (content.width.saturating_sub(img_w)) / 2;
+    let img_area = Rect::new(img_x, content.y, img_w, img_h);
+
+    // Text lines placed directly below image, using full content width
+    let txt_y = content.y + img_h;
+    let txt_area = Rect::new(content.x, txt_y, content.width, 1);
+    let sts_y = txt_y + 1;
+    let sts_area = if sts_y < content.y + content.height {
+        Rect::new(content.x, sts_y, content.width, 1)
+    } else {
+        Rect::new(content.x, txt_y, 0, 0) // no room
+    };
+
+    render_cover(f, app, img_area, manhwa_id, cover_url.as_deref());
+    render_title_text(f, txt_area, &title, is_selected);
+    if sts_area.width > 0 {
+        render_status_line(f, sts_area, &status, unread, &status_display);
+    }
+}
+
+fn render_cover(f: &mut Frame, app: &mut App, area: Rect, manhwa_id: i64, cover_url: Option<&str>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    app.cover_cache.ensure_loaded(manhwa_id, cover_url);
+
+    if let Some(protocol) = app.get_cover_protocol(manhwa_id) {
+        let image_widget = StatefulImage::default();
+        f.render_stateful_widget(image_widget, area, protocol);
+        return;
+    }
+
     let placeholder = Paragraph::new("No\nCover")
         .style(Style::default().fg(Color::DarkGray))
-        .alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(placeholder, inner);
+        .alignment(Alignment::Center);
+    f.render_widget(placeholder, area);
+}
+
+/// Truncate a string to fit within `max_chars` display columns, appending "…" if needed.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 { return String::new(); }
+    let char_count: usize = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool) {
+    let display = truncate_str(title, area.width as usize);
+
+    let style = if selected {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let para = Paragraph::new(display)
+        .style(style)
+        .alignment(Alignment::Center);
+    f.render_widget(para, area);
+}
+
+fn render_status_line(f: &mut Frame, area: Rect, status: &Status, unread: u32, status_display: &str) {
+    let status_color = match status {
+        Status::LookedInto => Color::Gray,
+        Status::Reading    => Color::Green,
+        Status::UpToDate   => Color::Cyan,
+        Status::Paused     => Color::Yellow,
+        Status::Completed  => Color::Blue,
+        Status::Dropped    => Color::DarkGray,
+    };
+
+    let text = if unread > 0 {
+        format!("[{}] {}", unread, status_display)
+    } else {
+        status_display.to_string()
+    };
+
+    let text = truncate_str(&text, area.width as usize);
+
+    let para = Paragraph::new(text)
+        .style(Style::default().fg(status_color))
+        .alignment(Alignment::Center);
+    f.render_widget(para, area);
 }
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let msg = app
         .status_msg
         .as_deref()
-        .unwrap_or("j/k move  Enter open  / search  a add  d delete  q quit");
+        .unwrap_or("h/l move  j/k row  Enter open  / search  a add  d delete  q quit");
 
     let bar = Paragraph::new(msg).style(
         Style::default()
@@ -209,12 +279,20 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
         Line::from(Span::styled(" Navigation", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(vec![
+            Span::styled(" h/←  ", Style::default().fg(Color::Yellow)),
+            Span::raw("left"),
+        ]),
+        Line::from(vec![
+            Span::styled(" l/→  ", Style::default().fg(Color::Yellow)),
+            Span::raw("right"),
+        ]),
+        Line::from(vec![
             Span::styled(" j/↓  ", Style::default().fg(Color::Yellow)),
-            Span::raw("move down"),
+            Span::raw("down"),
         ]),
         Line::from(vec![
             Span::styled(" k/↑  ", Style::default().fg(Color::Yellow)),
-            Span::raw("move up"),
+            Span::raw("up"),
         ]),
         Line::from(vec![
             Span::styled(" g    ", Style::default().fg(Color::Yellow)),
@@ -226,7 +304,7 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(Color::Yellow)),
-            Span::raw("open"),
+            Span::raw(" open"),
         ]),
         Line::from(""),
         Line::from(Span::styled(" Library", Style::default().add_modifier(Modifier::BOLD))),
@@ -237,7 +315,7 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(" a    ", Style::default().fg(Color::Yellow)),
-            Span::raw("add manhwa"),
+            Span::raw("add"),
         ]),
         Line::from(vec![
             Span::styled(" d    ", Style::default().fg(Color::Yellow)),
@@ -259,9 +337,7 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
 }
 
 fn draw_delete_confirm(f: &mut Frame, app: &App) {
-    use ratatui::widgets::Clear;
-
-    let area  = f.size();
+    let area = f.size();
     let popup = centered_rect(50, 25, area);
 
     let title = app.confirm_delete_id

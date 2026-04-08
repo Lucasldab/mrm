@@ -78,20 +78,16 @@ pub struct App {
     // Cover cache and image rendering
     pub cover_cache: CoverCache,
     pub picker: Option<Picker>,
-    pub cover_protocols: HashMap<i64, Box<dyn StatefulProtocol>>,
+    pub cover_protocols: HashMap<i64, StatefulProtocol>,
+    pub cover_tick: u8,
+
+    // Grid layout (computed during render, used for navigation)
+    pub grid_cols: usize,
 }
 
 impl App {
-    pub async fn new(pool: SqlitePool) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, picker: Option<Picker>) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
-
-        // Detect terminal graphics protocol before raw mode is enabled.
-        // guess_protocol() queries the terminal via stdin/stdout escape sequences.
-        let picker = {
-            let mut p = Picker::from_termios().unwrap_or_else(|_| Picker::new((8, 12)));
-            p.guess_protocol();
-            Some(p)
-        };
 
         Ok(Self {
             pool,
@@ -126,6 +122,8 @@ impl App {
             cover_cache:             CoverCache::new(),
             picker,
             cover_protocols:         HashMap::new(),
+            cover_tick:              0,
+            grid_cols:               1,
         })
     }
 
@@ -151,7 +149,28 @@ impl App {
     pub async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Key(key) => self.handle_key(key).await?,
-            AppEvent::Tick     => self.poll_images(),
+            AppEvent::Tick     => {
+                self.poll_images();
+                // Periodically re-check disk for newly downloaded covers
+                // (background preload runs async, covers appear over time).
+                // Every ~2 seconds (8 ticks × 250ms).
+                self.cover_tick += 1;
+                if self.cover_tick >= 8 {
+                    self.cover_tick = 0;
+                    self.cover_cache.reload_from_disk(&self.manhwa_list);
+                    // Invalidate protocols for covers that just became available
+                    // so they get recreated with the actual image data.
+                    let stale_ids: Vec<i64> = self.cover_protocols.keys().copied().collect();
+                    for id in stale_ids {
+                        if self.cover_cache.get(id).is_some() {
+                            // Protocol exists and image exists — keep it
+                        } else {
+                            // Protocol was for a placeholder — remove so it gets recreated
+                            self.cover_protocols.remove(&id);
+                        }
+                    }
+                }
+            }
             AppEvent::DataRefreshed => {
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
                 self.cover_cache.reload_from_disk(&self.manhwa_list);
@@ -257,9 +276,24 @@ impl App {
             return Ok(());
         }
 
+        let cols = self.grid_cols.max(1);
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down  => { if count > 0 { self.library_sel = (self.library_sel + 1).min(count - 1); } }
-            KeyCode::Char('k') | KeyCode::Up    => { self.library_sel = self.library_sel.saturating_sub(1); }
+            // Grid navigation: j/k move down/up by one row, h/l move left/right
+            KeyCode::Char('j') | KeyCode::Down  => {
+                if count > 0 {
+                    let next = self.library_sel + cols;
+                    self.library_sel = if next < count { next } else { count - 1 };
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up    => {
+                self.library_sel = self.library_sel.saturating_sub(cols);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if count > 0 { self.library_sel = (self.library_sel + 1).min(count - 1); }
+            }
+            KeyCode::Char('h') | KeyCode::Left  => {
+                self.library_sel = self.library_sel.saturating_sub(1);
+            }
             KeyCode::Char('g')                  => { self.library_sel = 0; }
             KeyCode::Char('G')                  => { self.library_sel = count.saturating_sub(1); }
             KeyCode::Char('/')                  => { self.search_active = true; self.search_query.clear(); }
@@ -361,9 +395,21 @@ impl App {
 
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         match key.code {
-            KeyCode::Esc      => { self.kill_imv(); self.open_detail(manhwa_id).await?; }
-            KeyCode::Char(']') => { self.kill_imv(); self.open_next_chapter(manhwa_id, chapter_id).await?; }
-            KeyCode::Char('[') => { self.kill_imv(); self.open_prev_chapter(manhwa_id, chapter_id).await?; }
+            KeyCode::Esc      => {
+                self.kill_imv();
+                self.update_read_progress(chapter_id, manhwa_id).await?;
+                self.open_detail(manhwa_id).await?;
+            }
+            KeyCode::Char(']') => {
+                self.kill_imv();
+                self.update_read_progress(chapter_id, manhwa_id).await?;
+                self.open_next_chapter(manhwa_id, chapter_id).await?;
+            }
+            KeyCode::Char('[') => {
+                self.kill_imv();
+                self.update_read_progress(chapter_id, manhwa_id).await?;
+                self.open_prev_chapter(manhwa_id, chapter_id).await?;
+            }
             _ => {}
         }
         Ok(())
@@ -381,7 +427,15 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up   => { self.status_sel = self.status_sel.saturating_sub(1); }
             KeyCode::Enter => {
                 let chosen = options[self.status_sel].clone();
-                db::set_manhwa_status(&self.pool, manhwa_id, &chosen, true).await?;
+                // When setting "Up to Date", mark all chapters as read and let
+                // auto-computation handle the status (no manual override needed).
+                if chosen == Status::UpToDate {
+                    db::mark_all_chapters_read(&self.pool, manhwa_id).await?;
+                    db::clear_status_override(&self.pool, manhwa_id).await?;
+                    db::recompute_status(&self.pool, manhwa_id).await?;
+                } else {
+                    db::set_manhwa_status(&self.pool, manhwa_id, &chosen, true).await?;
+                }
                 self.refresh_detail(manhwa_id).await?;
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
                 self.screen = Screen::Detail { manhwa_id };
@@ -749,7 +803,7 @@ h = pan 50 0\nl = pan -50 0\n<Up> = zoom 1\n<Down> = zoom -1\nf = fullscreen\n\
     pub fn clear_msg(&mut self)                       { self.status_msg = None; }
 
     /// Get or create a StatefulProtocol for a manhwa's cover image.
-    pub fn get_cover_protocol(&mut self, manhwa_id: i64) -> Option<&mut Box<dyn StatefulProtocol>> {
+    pub fn get_cover_protocol(&mut self, manhwa_id: i64) -> Option<&mut StatefulProtocol> {
         if self.cover_protocols.contains_key(&manhwa_id) {
             return self.cover_protocols.get_mut(&manhwa_id);
         }

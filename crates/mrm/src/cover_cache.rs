@@ -46,7 +46,7 @@ impl CoverCache {
         if path.exists() {
             match image::open(&path) {
                 Ok(img) => {
-                    let resized = img.resize(80, 120, image::imageops::FilterType::Triangle);
+                    let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
                     self.images.insert(manhwa_id, Some(resized));
                 }
                 Err(_) => {
@@ -67,7 +67,7 @@ impl CoverCache {
             let path = self.cache_dir.join(format!("{manhwa_id}.jpg"));
             if path.exists() {
                 if let Ok(img) = image::open(&path) {
-                    let resized = img.resize(80, 120, image::imageops::FilterType::Triangle);
+                    let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
                     self.images.insert(manhwa_id, Some(resized));
                 }
             }
@@ -90,7 +90,7 @@ impl CoverCache {
             let path = self.cache_dir.join(format!("{}.jpg", m.id));
             if path.exists() {
                 if let Ok(img) = image::open(&path) {
-                    let resized = img.resize(80, 120, image::imageops::FilterType::Triangle);
+                    let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
                     self.images.insert(m.id, Some(resized));
                 }
             }
@@ -153,7 +153,7 @@ pub async fn preload_covers(cache_dir: PathBuf, manhwa_list: Vec<(i64, Option<St
             if img.width() > 4000 || img.height() > 4000 {
                 return;
             }
-            let resized = img.resize(80, 120, image::imageops::FilterType::Triangle);
+            let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
             let _ = resized.save(&path);
         });
     }

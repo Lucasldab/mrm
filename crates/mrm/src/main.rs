@@ -124,7 +124,19 @@ async fn main() -> Result<()> {
         tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c))
     });
 
-    let mut app = match App::new(pool).await {
+    // Detect terminal graphics protocol and font size.
+    // from_query_stdio() can corrupt stdin on some setups, so we try it
+    // and fall back to font-size-only detection if it fails.
+    let picker = {
+        let mut p = ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        // Flush any leftover escape sequence responses before entering raw mode
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        Some(p)
+    };
+
+    let mut app = match App::new(pool, picker).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };
