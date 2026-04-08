@@ -103,6 +103,14 @@ status_reading = "#00ff88"
 highlight_bg = "236"
 ```
 
+## Disclaimer
+
+This project does not host, store, or distribute any copyrighted content. It simply interacts with publicly available third-party websites and APIs. The developers are not responsible for any misuse of this software or for any content accessed through it.
+
+This software is provided for **personal and educational purposes only**. Users are solely responsible for ensuring their use complies with applicable laws and the terms of service of any third-party sources. The developers do not condone or encourage piracy in any form.
+
+If you are a copyright holder and believe this project infringes on your rights, please open an issue on this repository.
+
 ## License
 
-MIT
+MIT - see [LICENSE](LICENSE)
