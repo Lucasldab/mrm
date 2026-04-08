@@ -50,6 +50,41 @@ fn dirs_next() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Startup cleanup
+// ---------------------------------------------------------------------------
+
+/// Remove stale mrm_* directories in /tmp left by crashed sessions.
+/// Called once at startup before the TUI starts. Silently ignores errors.
+fn startup_cleanup_tmp() {
+    let tmp = std::env::temp_dir();
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(86_400))   // 1 day
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+    let entries = match std::fs::read_dir(&tmp) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("mrm_") { continue; }
+
+        // Only delete if older than 1 day (avoids touching a live session
+        // that happens to share the same prefix in a multi-user setup).
+        let age_ok = entry.metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t < cutoff)
+            .unwrap_or(false);
+
+        if age_ok {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -61,6 +96,7 @@ async fn main() -> Result<()> {
         Ok(p) => p,
         Err(e) => { eprintln!("mrm: DB error: {e}"); return Err(e); }
     };
+    startup_cleanup_tmp();
     let mut app = match App::new(pool).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
