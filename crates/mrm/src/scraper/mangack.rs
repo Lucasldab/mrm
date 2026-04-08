@@ -11,6 +11,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use chrono::Datelike;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -476,7 +477,7 @@ fn extract_chapter_date(
 // Private helper: extract_chapter_number
 // ---------------------------------------------------------------------------
 
-fn extract_chapter_number(label: &str, url: &str) -> Option<f64> {
+pub(crate) fn extract_chapter_number(label: &str, url: &str) -> Option<f64> {
     let label_match = RE_CHAPTER_NUM.captures(label).and_then(|cap| {
         let s = cap[1].replace('_', ".");
         s.parse::<f64>().ok()
@@ -515,7 +516,7 @@ fn extract_chapter_number(label: &str, url: &str) -> Option<f64> {
 // Private helper: parse_relative_date
 // ---------------------------------------------------------------------------
 
-fn parse_relative_date(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+pub(crate) fn parse_relative_date(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let s = raw.to_lowercase();
 
     // Relative date patterns — try each in order
@@ -545,9 +546,11 @@ fn parse_relative_date(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<
         return Some(dt.format("%Y-%m-%d").to_string());
     }
     if let Some(cap) = RE_YEAR.captures(&s) {
-        let n: i64 = cap[1].parse().ok()?;
-        let dt = now - chrono::Duration::days(n * 365);
-        return Some(dt.format("%Y-%m-%d").to_string());
+        let n: i32 = cap[1].parse().ok()?;
+        let date = now.date_naive();
+        // Use calendar-aware year subtraction so leap years don't shift the date
+        let past = date.with_year(date.year() - n)?;
+        return Some(past.format("%Y-%m-%d").to_string());
     }
 
     // Absolute date fallbacks — try common formats
@@ -558,4 +561,116 @@ fn parse_relative_date(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn fixed_now() -> chrono::DateTime<Utc> {
+        // 2024-06-15 12:00:00 UTC — fixed reference for deterministic assertions
+        Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap()
+    }
+
+    // --- parse_relative_date ---
+
+    #[test]
+    fn relative_date_minutes() {
+        let result = parse_relative_date("5 minutes ago", fixed_now());
+        assert_eq!(result, Some("2024-06-15".to_string()));
+    }
+
+    #[test]
+    fn relative_date_hours() {
+        // 2 hours before 2024-06-15 12:00 is still 2024-06-15
+        let result = parse_relative_date("2 hours ago", fixed_now());
+        assert_eq!(result, Some("2024-06-15".to_string()));
+    }
+
+    #[test]
+    fn relative_date_days() {
+        // 3 days before 2024-06-15 is 2024-06-12
+        let result = parse_relative_date("3 days ago", fixed_now());
+        assert_eq!(result, Some("2024-06-12".to_string()));
+    }
+
+    #[test]
+    fn relative_date_weeks() {
+        // 1 week = 7 days before 2024-06-15 is 2024-06-08
+        let result = parse_relative_date("1 week ago", fixed_now());
+        assert_eq!(result, Some("2024-06-08".to_string()));
+    }
+
+    #[test]
+    fn relative_date_months() {
+        // 2 months = 60 days before 2024-06-15 is 2024-04-16
+        let result = parse_relative_date("2 months ago", fixed_now());
+        assert_eq!(result, Some("2024-04-16".to_string()));
+    }
+
+    #[test]
+    fn relative_date_years() {
+        // 1 year = 365 days before 2024-06-15 is 2023-06-15
+        let result = parse_relative_date("1 year ago", fixed_now());
+        assert_eq!(result, Some("2023-06-15".to_string()));
+    }
+
+    #[test]
+    fn relative_date_absolute_long() {
+        let result = parse_relative_date("January 15, 2024", fixed_now());
+        assert_eq!(result, Some("2024-01-15".to_string()));
+    }
+
+    #[test]
+    fn relative_date_absolute_iso() {
+        let result = parse_relative_date("2024-03-10", fixed_now());
+        assert_eq!(result, Some("2024-03-10".to_string()));
+    }
+
+    #[test]
+    fn relative_date_gibberish_returns_none() {
+        let result = parse_relative_date("gibberish text here", fixed_now());
+        assert_eq!(result, None);
+    }
+
+    // --- extract_chapter_number ---
+
+    #[test]
+    fn chapter_number_from_label() {
+        assert_eq!(extract_chapter_number("Chapter 42", ""), Some(42.0));
+    }
+
+    #[test]
+    fn chapter_number_decimal() {
+        assert_eq!(extract_chapter_number("Chapter 42.5", ""), Some(42.5));
+    }
+
+    #[test]
+    fn chapter_number_case_insensitive() {
+        assert_eq!(extract_chapter_number("CHAPTER 10", ""), Some(10.0));
+    }
+
+    #[test]
+    fn chapter_number_url_fallback() {
+        assert_eq!(
+            extract_chapter_number("", "https://mangack.com/chapter/chapter-7/"),
+            Some(7.0)
+        );
+    }
+
+    #[test]
+    fn chapter_number_underscore_normalized() {
+        assert_eq!(extract_chapter_number("Chapter 1_5", ""), Some(1.5));
+    }
+
+    #[test]
+    fn chapter_number_nav_button_returns_none() {
+        // Nav buttons contain no chapter number
+        assert_eq!(extract_chapter_number("First Chapter", "/chapter/first/"), None);
+    }
 }
