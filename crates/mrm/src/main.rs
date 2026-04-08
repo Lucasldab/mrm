@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod db;
+mod notifier;
 mod scraper;
 mod types;
 mod ui;
