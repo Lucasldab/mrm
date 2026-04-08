@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
@@ -10,24 +10,26 @@ use crate::app::App;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.size();
+    let theme = &app.theme;
+    let keys = &app.keys;
 
     let error_height = if app.add_search_error.is_some() { 1 } else { 0 };
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),            // input box
-            Constraint::Min(0),               // results list
-            Constraint::Length(error_height), // error line
-            Constraint::Length(1),            // status bar
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(error_height),
+            Constraint::Length(1),
         ])
         .split(area);
 
     // --- Input box ---
     let input_style = if app.add_search_input_active {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.accent())
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.text())
     };
     let cursor = if app.add_search_input_active { "█" } else { "" };
     let input_text = format!(" {}{}", app.add_search_query, cursor);
@@ -44,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     .title(input_title)
                     .border_style(input_style),
             )
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(theme.text())),
         rows[0],
     );
 
@@ -58,7 +60,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         };
         vec![ListItem::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.text_secondary()),
         )))]
     } else {
         results
@@ -66,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .map(|r| {
                 let source_badge = Span::styled(
                     format!("[{}] ", r.source),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.accent()),
                 );
                 let title_span = Span::styled(
                     r.title.clone(),
@@ -74,7 +76,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 );
                 let pub_span = Span::styled(
                     format!("  {}", r.pub_status),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.text_secondary()),
                 );
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
@@ -92,11 +94,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(list_title)
-                .border_style(Style::default().fg(Color::White)),
+                .border_style(Style::default().fg(theme.border())),
         )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(theme.highlight_bg())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -111,22 +113,22 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(err) = &app.add_search_error {
         f.render_widget(
             Paragraph::new(format!(" {}", err))
-                .style(Style::default().fg(Color::Red)),
+                .style(Style::default().fg(theme.error())),
             rows[2],
         );
     }
 
     // --- Status bar ---
     let hint = if app.add_search_loading {
-        " Fetching... please wait"
+        " Fetching... please wait".to_string()
     } else if app.add_search_input_active {
-        " Enter search  Esc back"
+        format!(" Enter search  Esc back")
     } else {
-        " j/k move  Enter add  i edit query  Esc back"
+        format!(" {}/{} move  Enter add  {} edit query  Esc back", keys.down, keys.up, keys.input_mode)
     };
     f.render_widget(
         Paragraph::new(hint)
-            .style(Style::default().fg(Color::Black).bg(Color::White)),
+            .style(Style::default().fg(theme.bar_fg()).bg(theme.bar_bg())),
         rows[3],
     );
 }

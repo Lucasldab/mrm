@@ -42,7 +42,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let search_text = format!(" / {}", app.search_query);
         let search = Paragraph::new(search_text)
             .block(Block::default().borders(Borders::ALL).title(" Search "))
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(app.theme.accent()));
         f.render_widget(search, rows[0]);
     }
 
@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         format!(" mrm — {} results ", visible.len())
     };
     let title_bar = Paragraph::new(title)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        .style(Style::default().fg(app.theme.text_bold()).add_modifier(Modifier::BOLD));
     f.render_widget(title_bar, rows[1]);
 
     // Grid area
@@ -64,7 +64,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_statusbar(f, app, rows[3]);
 
     // Right sidebar: keybinds
-    draw_keybinds(f, cols[1]);
+    draw_keybinds(f, app, cols[1]);
 
     // Delete confirmation overlay
     if app.confirm_delete_id.is_some() {
@@ -151,11 +151,11 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
         return;
     }
 
-    // Selected cell gets a yellow border
+    // Selected cell gets an accent border
     if is_selected {
         let border = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(app.theme.accent()));
         f.render_widget(border, area);
     }
 
@@ -184,9 +184,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
     };
 
     render_cover(f, app, img_area, manhwa_id, cover_url.as_deref());
-    render_title_text(f, txt_area, &title, is_selected);
+    render_title_text(f, txt_area, &title, is_selected, &app.theme);
     if sts_area.width > 0 {
-        render_status_line(f, sts_area, &status, unread, &status_display);
+        render_status_line(f, sts_area, &status, unread, &status_display, &app.theme);
     }
 }
 
@@ -204,7 +204,7 @@ fn render_cover(f: &mut Frame, app: &mut App, area: Rect, manhwa_id: i64, cover_
     }
 
     let placeholder = Paragraph::new("No\nCover")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(app.theme.text_secondary()))
         .alignment(Alignment::Center);
     f.render_widget(placeholder, area);
 }
@@ -221,13 +221,13 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool) {
+fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool, theme: &crate::config::ThemeConfig) {
     let display = truncate_str(title, area.width as usize);
 
     let style = if selected {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.text_bold()).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.text())
     };
 
     let para = Paragraph::new(display)
@@ -236,15 +236,8 @@ fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool) {
     f.render_widget(para, area);
 }
 
-fn render_status_line(f: &mut Frame, area: Rect, status: &Status, unread: u32, status_display: &str) {
-    let status_color = match status {
-        Status::LookedInto => Color::Gray,
-        Status::Reading    => Color::Green,
-        Status::UpToDate   => Color::Cyan,
-        Status::Paused     => Color::Yellow,
-        Status::Completed  => Color::Blue,
-        Status::Dropped    => Color::DarkGray,
-    };
+fn render_status_line(f: &mut Frame, area: Rect, status: &crate::types::Status, unread: u32, status_display: &str, theme: &crate::config::ThemeConfig) {
+    let status_color = theme.status_color(status);
 
     let text = if unread > 0 {
         format!("[{}] {}", unread, status_display)
@@ -268,68 +261,73 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
 
     let bar = Paragraph::new(msg).style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::White),
+            .fg(app.theme.bar_fg())
+            .bg(app.theme.bar_bg()),
     );
     f.render_widget(bar, area);
 }
 
-fn draw_keybinds(f: &mut Frame, area: Rect) {
+fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
+    let accent = app.theme.accent();
+    let secondary = app.theme.text_secondary();
+    let keys = &app.keys;
+
+    let key_style = Style::default().fg(accent);
     let lines = vec![
         Line::from(Span::styled(" Navigation", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" h/←  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}/←  ", keys.left), key_style),
             Span::raw("left"),
         ]),
         Line::from(vec![
-            Span::styled(" l/→  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}/→  ", keys.right), key_style),
             Span::raw("right"),
         ]),
         Line::from(vec![
-            Span::styled(" j/↓  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}/↓  ", keys.down), key_style),
             Span::raw("down"),
         ]),
         Line::from(vec![
-            Span::styled(" k/↑  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}/↑  ", keys.up), key_style),
             Span::raw("up"),
         ]),
         Line::from(vec![
-            Span::styled(" g    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}    ", keys.top), key_style),
             Span::raw("top"),
         ]),
         Line::from(vec![
-            Span::styled(" G    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}    ", keys.bottom), key_style),
             Span::raw("bottom"),
         ]),
         Line::from(vec![
-            Span::styled(" Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}", keys.open), key_style),
             Span::raw(" open"),
         ]),
         Line::from(""),
         Line::from(Span::styled(" Library", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" /    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}    ", keys.search), key_style),
             Span::raw("search"),
         ]),
         Line::from(vec![
-            Span::styled(" a    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}    ", keys.add), key_style),
             Span::raw("add"),
         ]),
         Line::from(vec![
-            Span::styled(" d    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}    ", keys.delete), key_style),
             Span::raw("delete"),
         ]),
         Line::from(vec![
-            Span::styled(" q    ", Style::default().fg(Color::Yellow)),
+            Span::styled(" q    ", key_style),
             Span::raw("quit"),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(secondary))
         .title(" Keys ");
 
     let para = Paragraph::new(lines).block(block);
@@ -346,8 +344,8 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
         .unwrap_or("this manhwa");
 
     let text = format!(
-        "\n  Delete \"{}\"?\n\n  This removes all chapters and reading progress.\n\n  Press d to confirm  |  Esc to cancel",
-        title
+        "\n  Delete \"{}\"?\n\n  This removes all chapters and reading progress.\n\n  Press {} to confirm  |  Esc to cancel",
+        title, app.keys.delete
     );
 
     f.render_widget(Clear, popup);
@@ -357,9 +355,9 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Confirm Delete ")
-                    .border_style(Style::default().fg(Color::Red)),
+                    .border_style(Style::default().fg(app.theme.error())),
             )
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(app.theme.text())),
         popup,
     );
 }

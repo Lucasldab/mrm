@@ -83,10 +83,14 @@ pub struct App {
 
     // Grid layout (computed during render, used for navigation)
     pub grid_cols: usize,
+
+    // Config
+    pub keys: crate::config::KeysConfig,
+    pub theme: crate::config::ThemeConfig,
 }
 
 impl App {
-    pub async fn new(pool: SqlitePool, picker: Option<Picker>) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, picker: Option<Picker>, keys: crate::config::KeysConfig, theme: crate::config::ThemeConfig) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
 
         Ok(Self {
@@ -124,6 +128,8 @@ impl App {
             cover_protocols:         HashMap::new(),
             cover_tick:              0,
             grid_cols:               1,
+            keys,
+            theme,
         })
     }
 
@@ -252,22 +258,21 @@ impl App {
 
     async fn handle_library_key(&mut self, key: KeyEvent) -> Result<()> {
         let count = self.visible_manhwa().len();
+        let k = key.code;
 
-        // If awaiting delete confirmation, handle only 'd' (confirm) or Esc (cancel)
+        // If awaiting delete confirmation, handle only delete (confirm) or back (cancel)
         if let Some(id) = self.confirm_delete_id {
-            match key.code {
-                KeyCode::Char('d') => { self.do_delete_manhwa(id).await?; }
-                KeyCode::Esc       => {
-                    self.confirm_delete_id = None;
-                    self.set_msg("Delete cancelled");
-                }
-                _ => {}
+            if k == self.keys.delete() {
+                self.do_delete_manhwa(id).await?;
+            } else if k == KeyCode::Esc || k == self.keys.back() {
+                self.confirm_delete_id = None;
+                self.set_msg("Delete cancelled");
             }
             return Ok(());
         }
 
         if self.search_active {
-            match key.code {
+            match k {
                 KeyCode::Esc | KeyCode::Enter => { self.search_active = false; }
                 KeyCode::Backspace => { self.search_query.pop(); self.library_sel = 0; }
                 KeyCode::Char(c)   => { self.search_query.push(c); self.library_sel = 0; }
@@ -277,51 +282,42 @@ impl App {
         }
 
         let cols = self.grid_cols.max(1);
-        match key.code {
-            // Grid navigation: j/k move down/up by one row, h/l move left/right
-            KeyCode::Char('j') | KeyCode::Down  => {
-                if count > 0 {
-                    let next = self.library_sel + cols;
-                    self.library_sel = if next < count { next } else { count - 1 };
-                }
+        if k == self.keys.down() || k == KeyCode::Down {
+            if count > 0 {
+                let next = self.library_sel + cols;
+                self.library_sel = if next < count { next } else { count - 1 };
             }
-            KeyCode::Char('k') | KeyCode::Up    => {
-                self.library_sel = self.library_sel.saturating_sub(cols);
+        } else if k == self.keys.up() || k == KeyCode::Up {
+            self.library_sel = self.library_sel.saturating_sub(cols);
+        } else if k == self.keys.right() || k == KeyCode::Right {
+            if count > 0 { self.library_sel = (self.library_sel + 1).min(count - 1); }
+        } else if k == self.keys.left() || k == KeyCode::Left {
+            self.library_sel = self.library_sel.saturating_sub(1);
+        } else if k == self.keys.top() {
+            self.library_sel = 0;
+        } else if k == self.keys.bottom() {
+            self.library_sel = count.saturating_sub(1);
+        } else if k == self.keys.search() {
+            self.search_active = true; self.search_query.clear();
+        } else if k == self.keys.add() {
+            self.add_search_query.clear();
+            self.add_search_results.clear();
+            self.add_search_sel = 0;
+            self.add_search_input_active = true;
+            self.screen = Screen::Search;
+        } else if k == self.keys.delete() {
+            if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
+                self.confirm_delete_id = Some(manhwa.id);
             }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if count > 0 { self.library_sel = (self.library_sel + 1).min(count - 1); }
+        } else if k == KeyCode::Esc || k == self.keys.back() {
+            if !self.search_query.is_empty() {
+                self.search_query.clear();
+                self.library_sel = 0;
             }
-            KeyCode::Char('h') | KeyCode::Left  => {
-                self.library_sel = self.library_sel.saturating_sub(1);
+        } else if k == self.keys.open() || k == KeyCode::Enter {
+            if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
+                self.open_detail(manhwa.id).await?;
             }
-            KeyCode::Char('g')                  => { self.library_sel = 0; }
-            KeyCode::Char('G')                  => { self.library_sel = count.saturating_sub(1); }
-            KeyCode::Char('/')                  => { self.search_active = true; self.search_query.clear(); }
-            KeyCode::Char('a') => {
-                self.add_search_query.clear();
-                self.add_search_results.clear();
-                self.add_search_sel = 0;
-                self.add_search_input_active = true;
-                self.screen = Screen::Search;
-            }
-            KeyCode::Char('d') => {
-                if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
-                    self.confirm_delete_id = Some(manhwa.id);
-                }
-            }
-            KeyCode::Esc => {
-                if !self.search_query.is_empty() {
-                    self.search_query.clear();
-                    self.library_sel = 0;
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
-                    let id = manhwa.id;
-                    self.open_detail(id).await?;
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -331,60 +327,56 @@ impl App {
     // -----------------------------------------------------------------------
 
     async fn handle_detail_key(&mut self, key: KeyEvent, manhwa_id: i64) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                self.screen = Screen::Library;
-                self.chapter_list.clear();
-                self.current_manhwa = None;
+        let k = key.code;
+        if k == KeyCode::Esc || k == self.keys.back() {
+            self.screen = Screen::Library;
+            self.chapter_list.clear();
+            self.current_manhwa = None;
+        } else if k == self.keys.down() || k == KeyCode::Down {
+            let len = self.chapter_list.len();
+            if len > 0 { self.chapter_sel = (self.chapter_sel + 1).min(len - 1); }
+        } else if k == self.keys.up() || k == KeyCode::Up {
+            self.chapter_sel = self.chapter_sel.saturating_sub(1);
+        } else if k == self.keys.top() {
+            self.chapter_sel = 0;
+        } else if k == self.keys.bottom() {
+            self.chapter_sel = self.chapter_list.len().saturating_sub(1);
+        } else if k == self.keys.set_status() {
+            let current_idx = self.current_manhwa.as_ref()
+                .and_then(|m| Status::all().iter().position(|s| s == &m.status))
+                .unwrap_or(0);
+            self.status_sel = current_idx;
+            self.screen = Screen::StatusPicker { manhwa_id };
+        } else if k == self.keys.mark_unread() {
+            if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
+                let chapter_id = ch.id;
+                sqlx::query(
+                    "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = ?",
+                )
+                .bind(chapter_id)
+                .execute(&self.pool)
+                .await?;
+                db::recompute_status(&self.pool, manhwa_id).await?;
+                self.refresh_detail(manhwa_id).await?;
+                self.set_msg("Marked as unread");
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                let len = self.chapter_list.len();
-                if len > 0 { self.chapter_sel = (self.chapter_sel + 1).min(len - 1); }
-            }
-            KeyCode::Char('k') | KeyCode::Up   => { self.chapter_sel = self.chapter_sel.saturating_sub(1); }
-            KeyCode::Char('g')                  => { self.chapter_sel = 0; }
-            KeyCode::Char('G')                  => { self.chapter_sel = self.chapter_list.len().saturating_sub(1); }
-            KeyCode::Char('s') => {
-                let current_idx = self.current_manhwa.as_ref()
-                    .and_then(|m| Status::all().iter().position(|s| s == &m.status))
-                    .unwrap_or(0);
-                self.status_sel = current_idx;
-                self.screen = Screen::StatusPicker { manhwa_id };
-            }
-            KeyCode::Char('u') => {
-                if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
-                    let chapter_id = ch.id;
-                    sqlx::query(
-                        "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = ?",
-                    )
-                    .bind(chapter_id)
-                    .execute(&self.pool)
-                    .await?;
+        } else if k == self.keys.clear_override() {
+            if let Some(manhwa) = &self.current_manhwa {
+                if manhwa.status_override {
+                    db::clear_status_override(&self.pool, manhwa_id).await?;
                     db::recompute_status(&self.pool, manhwa_id).await?;
                     self.refresh_detail(manhwa_id).await?;
-                    self.set_msg("Marked as unread");
+                    self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                    self.set_msg("Status override cleared — auto-tracking resumed");
+                } else {
+                    self.set_msg("No override active");
                 }
             }
-            KeyCode::Char('c') => {
-                if let Some(manhwa) = &self.current_manhwa {
-                    if manhwa.status_override {
-                        db::clear_status_override(&self.pool, manhwa_id).await?;
-                        db::recompute_status(&self.pool, manhwa_id).await?;
-                        self.refresh_detail(manhwa_id).await?;
-                        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
-                        self.set_msg("Status override cleared — auto-tracking resumed");
-                    } else {
-                        self.set_msg("No override active");
-                    }
-                }
+        } else if k == self.keys.open() || k == KeyCode::Enter {
+            if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
+                let chapter_id = ch.id;
+                self.open_reader(manhwa_id, chapter_id).await?;
             }
-            KeyCode::Enter => {
-                if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
-                    let chapter_id = ch.id;
-                    self.open_reader(manhwa_id, chapter_id).await?;
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -394,23 +386,19 @@ impl App {
     // -----------------------------------------------------------------------
 
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
-        match key.code {
-            KeyCode::Esc      => {
-                self.kill_imv();
-                self.update_read_progress(chapter_id, manhwa_id).await?;
-                self.open_detail(manhwa_id).await?;
-            }
-            KeyCode::Char(']') => {
-                self.kill_imv();
-                self.update_read_progress(chapter_id, manhwa_id).await?;
-                self.open_next_chapter(manhwa_id, chapter_id).await?;
-            }
-            KeyCode::Char('[') => {
-                self.kill_imv();
-                self.update_read_progress(chapter_id, manhwa_id).await?;
-                self.open_prev_chapter(manhwa_id, chapter_id).await?;
-            }
-            _ => {}
+        let k = key.code;
+        if k == KeyCode::Esc || k == self.keys.back() {
+            self.kill_imv();
+            self.update_read_progress(chapter_id, manhwa_id).await?;
+            self.open_detail(manhwa_id).await?;
+        } else if k == self.keys.next_chapter() {
+            self.kill_imv();
+            self.update_read_progress(chapter_id, manhwa_id).await?;
+            self.open_next_chapter(manhwa_id, chapter_id).await?;
+        } else if k == self.keys.prev_chapter() {
+            self.kill_imv();
+            self.update_read_progress(chapter_id, manhwa_id).await?;
+            self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
         Ok(())
     }
@@ -421,60 +409,58 @@ impl App {
 
     async fn handle_status_picker_key(&mut self, key: KeyEvent, manhwa_id: i64) -> Result<()> {
         let options = Status::all();
-        match key.code {
-            KeyCode::Esc => { self.screen = Screen::Detail { manhwa_id }; }
-            KeyCode::Char('j') | KeyCode::Down => { self.status_sel = (self.status_sel + 1).min(options.len() - 1); }
-            KeyCode::Char('k') | KeyCode::Up   => { self.status_sel = self.status_sel.saturating_sub(1); }
-            KeyCode::Enter => {
-                let chosen = options[self.status_sel].clone();
-                // When setting "Up to Date", mark all chapters as read and let
-                // auto-computation handle the status (no manual override needed).
-                if chosen == Status::UpToDate {
-                    db::mark_all_chapters_read(&self.pool, manhwa_id).await?;
-                    db::clear_status_override(&self.pool, manhwa_id).await?;
-                    db::recompute_status(&self.pool, manhwa_id).await?;
-                } else {
-                    db::set_manhwa_status(&self.pool, manhwa_id, &chosen, true).await?;
-                }
-                self.refresh_detail(manhwa_id).await?;
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
-                self.screen = Screen::Detail { manhwa_id };
-                self.set_msg(format!("Status set to: {}", chosen.as_str()));
+        let k = key.code;
+        if k == KeyCode::Esc || k == self.keys.back() {
+            self.screen = Screen::Detail { manhwa_id };
+        } else if k == self.keys.down() || k == KeyCode::Down {
+            self.status_sel = (self.status_sel + 1).min(options.len() - 1);
+        } else if k == self.keys.up() || k == KeyCode::Up {
+            self.status_sel = self.status_sel.saturating_sub(1);
+        } else if k == self.keys.open() || k == KeyCode::Enter {
+            let chosen = options[self.status_sel].clone();
+            if chosen == Status::UpToDate {
+                db::mark_all_chapters_read(&self.pool, manhwa_id).await?;
+                db::clear_status_override(&self.pool, manhwa_id).await?;
+                db::recompute_status(&self.pool, manhwa_id).await?;
+            } else {
+                db::set_manhwa_status(&self.pool, manhwa_id, &chosen, true).await?;
             }
-            _ => {}
+            self.refresh_detail(manhwa_id).await?;
+            self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+            self.screen = Screen::Detail { manhwa_id };
+            self.set_msg(format!("Status set to: {}", chosen.as_str()));
         }
         Ok(())
     }
 
     async fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
-        use KeyCode::*;
-
-        if self.add_search_loading { return Ok(()); }  // block input while loading
+        if self.add_search_loading { return Ok(()); }
+        let k = key.code;
 
         if self.add_search_input_active {
-            match key.code {
-                Esc        => {
-                    self.screen = Screen::Library;
-                    self.add_search_query.clear();
-                    self.add_search_results.clear();
-                    self.add_search_input_active = true;
-                }
-                Enter      => { self.search_all_scrapers().await?; }
-                Backspace  => { self.add_search_query.pop(); }
-                Char(c)    => { self.add_search_query.push(c); }
-                _          => {}
+            if k == KeyCode::Esc || k == self.keys.back() {
+                self.screen = Screen::Library;
+                self.add_search_query.clear();
+                self.add_search_results.clear();
+                self.add_search_input_active = true;
+            } else if k == KeyCode::Enter || k == self.keys.open() {
+                self.search_all_scrapers().await?;
+            } else if k == KeyCode::Backspace {
+                self.add_search_query.pop();
+            } else if let KeyCode::Char(c) = k {
+                self.add_search_query.push(c);
             }
         } else {
             // Browsing results
-            match key.code {
-                Esc | Char('i') => { self.add_search_input_active = true; }
-                Char('j') | Down  => {
-                    let len = self.add_search_results.len();
-                    if len > 0 { self.add_search_sel = (self.add_search_sel + 1).min(len - 1); }
-                }
-                Char('k') | Up    => { self.add_search_sel = self.add_search_sel.saturating_sub(1); }
-                Enter => { self.do_add_manhwa().await?; }
-                _     => {}
+            if k == KeyCode::Esc || k == self.keys.back() || k == self.keys.input_mode() {
+                self.add_search_input_active = true;
+            } else if k == self.keys.down() || k == KeyCode::Down {
+                let len = self.add_search_results.len();
+                if len > 0 { self.add_search_sel = (self.add_search_sel + 1).min(len - 1); }
+            } else if k == self.keys.up() || k == KeyCode::Up {
+                self.add_search_sel = self.add_search_sel.saturating_sub(1);
+            } else if k == KeyCode::Enter || k == self.keys.open() {
+                self.do_add_manhwa().await?;
             }
         }
         Ok(())

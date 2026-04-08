@@ -112,6 +112,14 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Extract keys/theme config (use defaults if config failed to load)
+    let keys_config = config_opt.as_ref()
+        .map(|c| c.keys.clone())
+        .unwrap_or_default();
+    let theme_config = config_opt.as_ref()
+        .map(|c| c.theme.clone())
+        .unwrap_or_default();
+
     // Set up coordinator channel and cancellation token.
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
     let shutdown = CancellationToken::new();
@@ -125,18 +133,15 @@ async fn main() -> Result<()> {
     });
 
     // Detect terminal graphics protocol and font size.
-    // from_query_stdio() can corrupt stdin on some setups, so we try it
-    // and fall back to font-size-only detection if it fails.
     let picker = {
         let mut p = ratatui_image::picker::Picker::from_query_stdio()
             .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
-        // Flush any leftover escape sequence responses before entering raw mode
         use std::io::Write;
         let _ = std::io::stdout().flush();
         Some(p)
     };
 
-    let mut app = match App::new(pool, picker).await {
+    let mut app = match App::new(pool, picker, keys_config, theme_config).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };

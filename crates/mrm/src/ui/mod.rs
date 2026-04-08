@@ -4,7 +4,7 @@ pub mod search;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
@@ -32,6 +32,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_reader(f: &mut Frame, app: &App) {
     let area = f.size();
+    let theme = &app.theme;
+    let keys = &app.keys;
 
     let chapter = match &app.current_chapter {
         Some(ch) => ch,
@@ -44,13 +46,15 @@ fn draw_reader(f: &mut Frame, app: &App) {
         .split(area);
 
     let header = format!(
-        " {} — {}{}  |  [ prev ch  ] next ch  Esc back",
+        " {} — {}{}  |  {} prev ch  {} next ch  Esc back",
         app.current_manhwa.as_ref().map(|m| m.title.as_str()).unwrap_or(""),
         chapter.display_title(),
         if app.images_loading { "  ⏳" } else { "" },
+        keys.prev_chapter,
+        keys.next_chapter,
     );
     f.render_widget(
-        Paragraph::new(header).style(Style::default().fg(Color::Black).bg(Color::White)),
+        Paragraph::new(header).style(Style::default().fg(theme.bar_fg()).bg(theme.bar_bg())),
         rows[0],
     );
 
@@ -64,14 +68,14 @@ fn draw_reader(f: &mut Frame, app: &App) {
         };
         (
             format!("\n  imv open{extra}.\n\n  arrows/scroll  navigate\n  +/-  zoom\n  f  fullscreen\n  q  quit imv"),
-            Color::Green,
+            theme.success(),
         )
     } else if app.images_loading {
-        (format!("\n  Downloading pages... ({n} ready)"), Color::Yellow)
+        (format!("\n  Downloading pages... ({n} ready)"), theme.warning())
     } else if app.image_paths.is_empty() {
-        ("\n  No images found.".into(), Color::Red)
+        ("\n  No images found.".into(), theme.error())
     } else {
-        ("\n  Opening imv...".into(), Color::Yellow)
+        ("\n  Opening imv...".into(), theme.warning())
     };
 
     f.render_widget(
@@ -80,8 +84,11 @@ fn draw_reader(f: &mut Frame, app: &App) {
     );
 
     f.render_widget(
-        Paragraph::new(" [ prev chapter  ] next chapter  Esc back  |  imv: arrows pan  scroll/+/- zoom  f fullscreen  q quit imv")
-            .style(Style::default().fg(Color::Black).bg(Color::White)),
+        Paragraph::new(format!(
+            " {} prev chapter  {} next chapter  Esc back  |  imv: arrows pan  scroll/+/- zoom  f fullscreen  q quit imv",
+            keys.prev_chapter, keys.next_chapter
+        ))
+            .style(Style::default().fg(theme.bar_fg()).bg(theme.bar_bg())),
         rows[2],
     );
 }
@@ -94,6 +101,7 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
     let area    = f.size();
     let popup   = centered_rect(40, 60, area);
     let options = Status::all();
+    let theme = &app.theme;
 
     let items: Vec<ListItem> = options.iter()
         .map(|s| ListItem::new(Line::from(format!("  {}", s.label(0)))))
@@ -101,8 +109,8 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Set Status ")
-            .border_style(Style::default().fg(Color::Yellow)))
-        .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+            .border_style(Style::default().fg(theme.accent())))
+        .highlight_style(Style::default().bg(theme.accent()).fg(theme.bar_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     let mut state = ListState::default();
