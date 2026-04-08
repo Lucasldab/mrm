@@ -1,0 +1,21 @@
+[package]
+name    = "mrm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mrm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = "1"
+chrono     = { version = "0.4", features = ["clock"] }
+crossterm  = { version = "0.27", features = ["event-stream"] }
+futures    = "0.3"
+image      = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+ratatui    = "0.26"
+reqwest    = { version = "0.12", features = ["json"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx       = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls", "migrate"] }
+tokio      = { version = "1", features = ["full"] }
