@@ -1,5 +1,6 @@
 pub mod library;
 pub mod detail;
+pub mod search;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -21,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             detail::draw(f, app);
             draw_status_picker(f, app);
         }
-        Screen::Search => draw_search(f, app),
+        Screen::Search => search::draw(f, app),
     }
 }
 
@@ -109,21 +110,6 @@ fn draw_status_picker(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup);
     f.render_stateful_widget(list, popup, &mut state);
-}
-
-// ---------------------------------------------------------------------------
-// Search / add screen (stub)
-// ---------------------------------------------------------------------------
-
-fn draw_search(f: &mut Frame, _app: &App) {
-    let area = f.size();
-    f.render_widget(
-        Paragraph::new("\n  Search & add manhwa\n\n  (Coming soon — paste a URL or search by title)\n\n  Press Esc to go back")
-            .block(Block::default().borders(Borders::ALL).title(" Add Manhwa ")
-                .border_style(Style::default().fg(Color::Green)))
-            .style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
 }
 
 // ---------------------------------------------------------------------------
