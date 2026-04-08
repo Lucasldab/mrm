@@ -10,7 +10,7 @@ mod ui;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{Event, EventStream, KeyEventKind},
     execute,
@@ -30,10 +30,9 @@ use types::AppEvent;
 // ---------------------------------------------------------------------------
 
 fn db_path() -> String {
-    // Look for mrm.db relative to the binary's location, then CWD, then home
     let candidates = [
         PathBuf::from("mrm.db"),
-        PathBuf::from("../../mrm.db"),   // when running from crates/mrm/
+        PathBuf::from("../../mrm.db"),
         dirs_next(),
     ];
     for p in &candidates {
@@ -41,12 +40,10 @@ fn db_path() -> String {
             return p.to_string_lossy().into_owned();
         }
     }
-    // Default: create in CWD
     "mrm.db".into()
 }
 
 fn dirs_next() -> PathBuf {
-    // XDG data dir fallback
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".local/share/mrm/mrm.db")
     } else {
@@ -58,12 +55,10 @@ fn dirs_next() -> PathBuf {
 // Startup cleanup
 // ---------------------------------------------------------------------------
 
-/// Remove stale mrm_* directories in /tmp left by crashed sessions.
-/// Called once at startup before the TUI starts. Silently ignores errors.
 fn startup_cleanup_tmp() {
     let tmp = std::env::temp_dir();
     let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(86_400))   // 1 day
+        .checked_sub(std::time::Duration::from_secs(86_400))
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
     let entries = match std::fs::read_dir(&tmp) {
@@ -76,8 +71,6 @@ fn startup_cleanup_tmp() {
         let name = name.to_string_lossy();
         if !name.starts_with("mrm_") { continue; }
 
-        // Only delete if older than 1 day (avoids touching a live session
-        // that happens to share the same prefix in a multi-user setup).
         let age_ok = entry.metadata()
             .and_then(|m| m.modified())
             .map(|t| t < cutoff)
@@ -90,29 +83,163 @@ fn startup_cleanup_tmp() {
 }
 
 // ---------------------------------------------------------------------------
+// CLI args
+// ---------------------------------------------------------------------------
+
+enum Mode {
+    Tui,
+    Daemon,
+    Once,
+}
+
+fn parse_args() -> Mode {
+    let args: Vec<String> = std::env::args().collect();
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--daemon" | "-d" => return Mode::Daemon,
+            "--once"          => return Mode::Once,
+            "--help" | "-h"   => {
+                eprintln!("Usage: mrm [OPTIONS]");
+                eprintln!();
+                eprintln!("Options:");
+                eprintln!("  --daemon, -d  Run as background poller (no TUI)");
+                eprintln!("  --once        Poll once and exit");
+                eprintln!("  --help, -h    Show this help");
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+    Mode::Tui
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mode = parse_args();
+
     let db_path = db_path();
-    eprintln!("mrm: opening DB at {}", db_path);
     let pool = match db::open_db(&db_path).await {
         Ok(p) => p,
         Err(e) => { eprintln!("mrm: DB error: {e}"); return Err(e); }
     };
+
+    let config = config::load_config()
+        .context("Config required — create config.toml (see README)");
+
+    match mode {
+        Mode::Daemon => run_daemon(pool, config?).await,
+        Mode::Once   => run_once(pool, config?).await,
+        Mode::Tui    => run_tui(pool, config.ok()).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon mode: poll forever, send notifications, no TUI
+// ---------------------------------------------------------------------------
+
+async fn run_daemon(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> {
+    eprintln!("mrm: daemon mode — polling every {} minutes", config.notifications.poll_interval_minutes);
+    eprintln!("mrm: press Ctrl-C to stop");
+
+    let shutdown = CancellationToken::new();
+    let shutdown_c = shutdown.clone();
+
+    // Handle Ctrl-C gracefully
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nmrm: shutting down...");
+        shutdown_c.cancel();
+    });
+
+    let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
+
+    // Run coordinator directly (not as a spawned task — this IS the main task)
+    scraper::coordinator_task(pool, config, shutdown, _tx).await;
+
+    eprintln!("mrm: daemon stopped");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Once mode: single poll, then exit
+// ---------------------------------------------------------------------------
+
+async fn run_once(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> {
+    eprintln!("mrm: single poll...");
+
+    let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
+    let _shutdown = CancellationToken::new();
+
+    // Build scraper registry
+    let registry = build_registry_for_once(&config);
+
+    let manhwa_list = db::fetch_all_manhwa(&pool).await?;
+    eprintln!("mrm: checking {} manhwa", manhwa_list.len());
+
+    let mut updated: Vec<String> = Vec::new();
+
+    for manhwa in &manhwa_list {
+        let scraper = match registry.get(manhwa.source.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let series = match scraper.get_series(&manhwa.source_url).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  ✗ {}: {e}", manhwa.title);
+                continue;
+            }
+        };
+
+        let new_count = db::upsert_chapters(&pool, manhwa.id, &series.chapters).await?;
+        let _ = db::recompute_status(&pool, manhwa.id).await;
+
+        if new_count > 0 {
+            eprintln!("  + {} — {} new chapter(s)", manhwa.title, new_count);
+            updated.push(manhwa.title.clone());
+        } else {
+            eprintln!("  ✓ {} — up to date", manhwa.title);
+        }
+    }
+
+    if !updated.is_empty() && config.notifications.enabled {
+        notifier::send_grouped(&updated);
+        eprintln!("\nmrm: notified for {} title(s)", updated.len());
+    } else {
+        eprintln!("\nmrm: no new chapters");
+    }
+
+    Ok(())
+}
+
+fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> {
+    use scraper::{MangaDexScraper, MangackScraper};
+    let mut registry: std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> = std::collections::HashMap::new();
+
+    for (name, source_cfg) in &config.sources {
+        if !source_cfg.enabled { continue; }
+        match name.as_str() {
+            "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
+            "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
+            _ => {}
+        }
+    }
+
+    registry
+}
+
+// ---------------------------------------------------------------------------
+// TUI mode (default)
+// ---------------------------------------------------------------------------
+
+async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> Result<()> {
     startup_cleanup_tmp();
 
-    // Load config — non-fatal; coordinator will simply not start without it.
-    let config_opt = match config::load_config() {
-        Ok(c) => Some(c),
-        Err(e) => {
-            eprintln!("mrm: config load failed ({e}), running without background polling");
-            None
-        }
-    };
-
-    // Extract keys/theme config (use defaults if config failed to load)
     let keys_config = config_opt.as_ref()
         .map(|c| c.keys.clone())
         .unwrap_or_default();
@@ -120,11 +247,9 @@ async fn main() -> Result<()> {
         .map(|c| c.theme.clone())
         .unwrap_or_default();
 
-    // Set up coordinator channel and cancellation token.
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
     let shutdown = CancellationToken::new();
 
-    // Spawn coordinator only if config loaded successfully.
     let coordinator_handle = config_opt.map(|cfg| {
         let pool_c     = pool.clone();
         let shutdown_c = shutdown.clone();
@@ -132,7 +257,6 @@ async fn main() -> Result<()> {
         tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c))
     });
 
-    // Detect terminal graphics protocol and font size.
     let picker = {
         let p = ratatui_image::picker::Picker::from_query_stdio()
             .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
@@ -172,7 +296,6 @@ async fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // Graceful coordinator shutdown — cancel token then await the task.
     shutdown.cancel();
     if let Some(handle) = coordinator_handle {
         let _ = handle.await;
@@ -191,11 +314,9 @@ async fn run_loop(
     let mut msg_timer: u8 = 0;
 
     loop {
-        // Draw first so the screen is always up-to-date before waiting
         terminal.draw(|f| ui::draw(f, &mut *app))?;
 
         tokio::select! {
-            // Keyboard / terminal event
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
@@ -206,14 +327,12 @@ async fn run_loop(
                 }
             }
 
-            // Scraper coordinator messages
             msg = scraper_rx.recv() => {
                 if let Some(ev) = msg {
                     app.handle_event(AppEvent::ScraperMsg(ev)).await?;
                 }
             }
 
-            // Tick: UI refresh + status message auto-clear
             _ = tick.tick() => {
                 app.handle_event(AppEvent::Tick).await?;
 
