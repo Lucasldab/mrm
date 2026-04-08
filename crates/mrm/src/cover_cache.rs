@@ -59,7 +59,19 @@ impl CoverCache {
     }
 
     /// Get a previously loaded cover image.
-    pub fn get(&self, manhwa_id: i64) -> Option<&DynamicImage> {
+    /// If currently None (not yet downloaded), re-checks disk in case
+    /// the background preload has finished downloading it.
+    pub fn get(&mut self, manhwa_id: i64) -> Option<&DynamicImage> {
+        // Re-check disk for entries that are None
+        if let Some(None) = self.images.get(&manhwa_id) {
+            let path = self.cache_dir.join(format!("{manhwa_id}.jpg"));
+            if path.exists() {
+                if let Ok(img) = image::open(&path) {
+                    let resized = img.resize(80, 120, image::imageops::FilterType::Triangle);
+                    self.images.insert(manhwa_id, Some(resized));
+                }
+            }
+        }
         self.images.get(&manhwa_id).and_then(|opt| opt.as_ref())
     }
 

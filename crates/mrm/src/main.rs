@@ -175,7 +175,7 @@ async fn run_loop(
 
     loop {
         // Draw first so the screen is always up-to-date before waiting
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal.draw(|f| ui::draw(f, &mut *app))?;
 
         tokio::select! {
             // Keyboard / terminal event

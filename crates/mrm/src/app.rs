@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use sqlx::sqlite::SqlitePool;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -71,13 +75,24 @@ pub struct App {
     // Delete confirmation
     pub confirm_delete_id: Option<i64>,  // Some(id) = waiting for confirmation keypress
 
-    // Cover cache
+    // Cover cache and image rendering
     pub cover_cache: CoverCache,
+    pub picker: Option<Picker>,
+    pub cover_protocols: HashMap<i64, Box<dyn StatefulProtocol>>,
 }
 
 impl App {
     pub async fn new(pool: SqlitePool) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
+
+        // Detect terminal graphics protocol before raw mode is enabled.
+        // guess_protocol() queries the terminal via stdin/stdout escape sequences.
+        let picker = {
+            let mut p = Picker::from_termios().unwrap_or_else(|_| Picker::new((8, 12)));
+            p.guess_protocol();
+            Some(p)
+        };
+
         Ok(Self {
             pool,
             screen:           Screen::Library,
@@ -109,6 +124,8 @@ impl App {
             add_search_input_active: true,
             confirm_delete_id:       None,
             cover_cache:             CoverCache::new(),
+            picker,
+            cover_protocols:         HashMap::new(),
         })
     }
 
@@ -730,6 +747,18 @@ h = pan 50 0\nl = pan -50 0\n<Up> = zoom 1\n<Down> = zoom -1\nf = fullscreen\n\
 
     pub fn set_msg(&mut self, msg: impl Into<String>) { self.status_msg = Some(msg.into()); }
     pub fn clear_msg(&mut self)                       { self.status_msg = None; }
+
+    /// Get or create a StatefulProtocol for a manhwa's cover image.
+    pub fn get_cover_protocol(&mut self, manhwa_id: i64) -> Option<&mut Box<dyn StatefulProtocol>> {
+        if self.cover_protocols.contains_key(&manhwa_id) {
+            return self.cover_protocols.get_mut(&manhwa_id);
+        }
+        let img = self.cover_cache.get(manhwa_id)?.clone();
+        let picker = self.picker.as_mut()?;
+        let protocol = picker.new_resize_protocol(img);
+        self.cover_protocols.insert(manhwa_id, protocol);
+        self.cover_protocols.get_mut(&manhwa_id)
+    }
 }
 
 // ---------------------------------------------------------------------------

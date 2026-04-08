@@ -13,8 +13,8 @@ use ratatui::{
 use crate::app::App;
 use crate::types::{Screen, Status};
 
-pub fn draw(f: &mut Frame, app: &App) {
-    match &app.screen {
+pub fn draw(f: &mut Frame, app: &mut App) {
+    match &app.screen.clone() {
         Screen::Library                    => library::draw(f, app),
         Screen::Detail { .. }              => detail::draw(f, app),
         Screen::Reader { .. }              => draw_reader(f, app),

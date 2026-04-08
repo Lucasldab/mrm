@@ -5,11 +5,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
+use ratatui_image::StatefulImage;
 
 use crate::app::App;
 use crate::types::Status;
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.size();
 
     // Split: main list | right sidebar (keybinds)
@@ -38,8 +39,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         f.render_widget(search, rows[0]);
     }
 
-    // Manhwa list
-    draw_list(f, app, rows[1]);
+    // Split list area into cover preview + list
+    let preview_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(10), Constraint::Min(0)])
+        .split(rows[1]);
+
+    // Left: cover preview for selected manhwa
+    draw_cover_preview(f, app, preview_cols[0]);
+
+    // Right: manhwa list
+    draw_list(f, app, preview_cols[1]);
 
     // Bottom status bar
     draw_statusbar(f, app, rows[2]);
@@ -141,6 +151,43 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     }
 
     f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_cover_preview(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let visible = app.visible_manhwa();
+    let selected = visible.get(app.library_sel).copied();
+
+    if let Some(manhwa) = selected {
+        let manhwa_id = manhwa.id;
+        let cover_url = manhwa.cover_url.clone();
+
+        // Ensure the cover is loaded from disk cache
+        app.cover_cache.ensure_loaded(manhwa_id, cover_url.as_deref());
+
+        // Get or create the protocol for this cover
+        if let Some(protocol) = app.get_cover_protocol(manhwa_id) {
+            let image_widget = StatefulImage::new(None);
+            f.render_stateful_widget(image_widget, inner, protocol);
+            return;
+        }
+    }
+
+    // No cover available — show placeholder
+    let placeholder = Paragraph::new("No\nCover")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(placeholder, inner);
 }
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
