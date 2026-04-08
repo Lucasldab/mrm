@@ -308,6 +308,19 @@ impl App {
                     self.set_msg("Marked as unread");
                 }
             }
+            KeyCode::Char('c') => {
+                if let Some(manhwa) = &self.current_manhwa {
+                    if manhwa.status_override {
+                        db::clear_status_override(&self.pool, manhwa_id).await?;
+                        db::recompute_status(&self.pool, manhwa_id).await?;
+                        self.refresh_detail(manhwa_id).await?;
+                        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                        self.set_msg("Status override cleared — auto-tracking resumed");
+                    } else {
+                        self.set_msg("No override active");
+                    }
+                }
+            }
             KeyCode::Enter => {
                 if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
                     let chapter_id = ch.id;

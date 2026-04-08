@@ -176,11 +176,15 @@ fn draw_chapters(f: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
-    let msg = app.status_msg.as_deref().unwrap_or(
-        "j/k move  Enter read  s status  u unread  Esc back",
-    );
+    let override_hint = if app.current_manhwa.as_ref().map(|m| m.status_override).unwrap_or(false) {
+        "  c clear override"
+    } else {
+        ""
+    };
+    let default_hint = format!("j/k move  Enter read  s status  u unread{override_hint}  Esc back");
+    let msg = app.status_msg.as_deref().unwrap_or(default_hint.as_str());
 
-    let bar = Paragraph::new(msg).style(
+    let bar = Paragraph::new(msg.to_owned()).style(
         Style::default().fg(Color::Black).bg(Color::White),
     );
     f.render_widget(bar, area);
