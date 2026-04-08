@@ -101,3 +101,19 @@ where
 // ---------------------------------------------------------------------------
 
 pub mod mangadex;   // Plan 02
+pub use mangadex::MangaDexScraper;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mangadex_scraper_instantiates() {
+        let scraper = MangaDexScraper::new();
+        assert_eq!(scraper.source_name(), "mangadex");
+    }
+}
