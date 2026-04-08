@@ -119,4 +119,10 @@ mod tests {
         let scraper = MangaDexScraper::new();
         assert_eq!(scraper.source_name(), "mangadex");
     }
+
+    #[test]
+    fn mangack_scraper_instantiates() {
+        let scraper = MangackScraper::new();
+        assert_eq!(scraper.source_name(), "mangack");
+    }
 }
