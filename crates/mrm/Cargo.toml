@@ -27,3 +27,4 @@ regex      = "1"
 tempfile   = "3"
 tracing    = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+ratatui-image = "1"

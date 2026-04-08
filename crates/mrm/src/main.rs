@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod cover_cache;
 mod db;
 mod notifier;
 mod scraper;
@@ -127,6 +128,17 @@ async fn main() -> Result<()> {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };
+
+    // Spawn background cover image preload
+    {
+        let preload_list: Vec<(i64, Option<String>)> = app.manhwa_list.iter()
+            .map(|m| (m.id, m.cover_url.clone()))
+            .collect();
+        tokio::spawn(cover_cache::preload_covers(
+            app.cover_cache.cache_dir().clone(),
+            preload_list,
+        ));
+    }
 
     // Set up terminal
     enable_raw_mode()?;

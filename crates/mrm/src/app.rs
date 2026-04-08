@@ -4,6 +4,7 @@ use sqlx::sqlite::SqlitePool;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
+use crate::cover_cache::CoverCache;
 use crate::types::{AppEvent, Chapter, Manhwa, Screen, Status};
 use crate::db;
 
@@ -69,6 +70,9 @@ pub struct App {
 
     // Delete confirmation
     pub confirm_delete_id: Option<i64>,  // Some(id) = waiting for confirmation keypress
+
+    // Cover cache
+    pub cover_cache: CoverCache,
 }
 
 impl App {
@@ -104,6 +108,7 @@ impl App {
             add_search_error:        None,
             add_search_input_active: true,
             confirm_delete_id:       None,
+            cover_cache:             CoverCache::new(),
         })
     }
 
@@ -132,6 +137,7 @@ impl App {
             AppEvent::Tick     => self.poll_images(),
             AppEvent::DataRefreshed => {
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.cover_cache.reload_from_disk(&self.manhwa_list);
             }
             AppEvent::ScraperMsg(ev) => self.handle_scraper_event(ev).await?,
         }
