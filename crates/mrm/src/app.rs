@@ -58,6 +58,14 @@ pub struct App {
     pub error_rx:        Option<mpsc::Receiver<String>>,
 
     pub status_msg: Option<String>,
+
+    // AddSearch screen state
+    pub add_search_query:        String,
+    pub add_search_results:      Vec<crate::scraper::SearchResult>,
+    pub add_search_sel:          usize,
+    pub add_search_loading:      bool,
+    pub add_search_error:        Option<String>,
+    pub add_search_input_active: bool,  // true = typing mode, false = browsing results
 }
 
 impl App {
@@ -86,6 +94,12 @@ impl App {
             session_dir:      None,
             error_rx:         None,
             status_msg:       None,
+            add_search_query:        String::new(),
+            add_search_results:      Vec::new(),
+            add_search_sel:          0,
+            add_search_loading:      false,
+            add_search_error:        None,
+            add_search_input_active: true,
         })
     }
 
@@ -194,6 +208,13 @@ impl App {
             KeyCode::Char('g')                  => { self.library_sel = 0; }
             KeyCode::Char('G')                  => { self.library_sel = count.saturating_sub(1); }
             KeyCode::Char('/')                  => { self.search_active = true; self.search_query.clear(); }
+            KeyCode::Char('a') => {
+                self.add_search_query.clear();
+                self.add_search_results.clear();
+                self.add_search_sel = 0;
+                self.add_search_input_active = true;
+                self.screen = Screen::Search;
+            }
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
                     self.search_query.clear();
@@ -299,7 +320,132 @@ impl App {
     }
 
     async fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.code == KeyCode::Esc { self.screen = Screen::Library; }
+        use KeyCode::*;
+
+        if self.add_search_loading { return Ok(()); }  // block input while loading
+
+        if self.add_search_input_active {
+            match key.code {
+                Esc        => {
+                    self.screen = Screen::Library;
+                    self.add_search_query.clear();
+                    self.add_search_results.clear();
+                    self.add_search_input_active = true;
+                }
+                Enter      => { self.search_all_scrapers().await?; }
+                Backspace  => { self.add_search_query.pop(); }
+                Char(c)    => { self.add_search_query.push(c); }
+                _          => {}
+            }
+        } else {
+            // Browsing results
+            match key.code {
+                Esc | Char('i') => { self.add_search_input_active = true; }
+                Char('j') | Down  => {
+                    let len = self.add_search_results.len();
+                    if len > 0 { self.add_search_sel = (self.add_search_sel + 1).min(len - 1); }
+                }
+                Char('k') | Up    => { self.add_search_sel = self.add_search_sel.saturating_sub(1); }
+                Enter => { self.do_add_manhwa().await?; }
+                _     => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Fan out search() to both scrapers concurrently, merge results.
+    /// Updates add_search_results and clears add_search_loading on completion.
+    pub async fn search_all_scrapers(&mut self) -> Result<()> {
+        use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+        let query = self.add_search_query.clone();
+        if query.trim().is_empty() {
+            self.add_search_results.clear();
+            return Ok(());
+        }
+
+        self.add_search_loading = true;
+        self.add_search_error   = None;
+        self.add_search_results.clear();
+
+        let mdx   = MangaDexScraper::new();
+        let mck   = MangackScraper::new();
+
+        // Run both searches concurrently; surface errors as status, not crash
+        let (mdx_res, mck_res) = tokio::join!(
+            mdx.search(&query),
+            mck.search(&query),
+        );
+
+        let mut merged = Vec::new();
+        match mdx_res {
+            Ok(r)  => merged.extend(r),
+            Err(e) => self.add_search_error = Some(format!("MangaDex: {e}")),
+        }
+        match mck_res {
+            Ok(r)  => merged.extend(r),
+            Err(e) => {
+                let existing = self.add_search_error.take().unwrap_or_default();
+                self.add_search_error = Some(format!("{existing}  MangaCK: {e}").trim().to_string());
+            }
+        }
+
+        self.add_search_results = merged;
+        self.add_search_sel     = 0;
+        self.add_search_loading = false;
+        self.add_search_input_active = false;  // move focus to results list
+        Ok(())
+    }
+
+    /// Fetch full series data for the selected search result and insert into DB.
+    pub async fn do_add_manhwa(&mut self) -> Result<()> {
+        use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+        use crate::db;
+
+        let result = match self.add_search_results.get(self.add_search_sel) {
+            Some(r) => r.clone(),
+            None    => return Ok(()),
+        };
+
+        self.add_search_loading = true;
+        self.add_search_error   = None;
+
+        let scraper: Box<dyn Scraper> = match result.source.as_str() {
+            "mangadex" => Box::new(MangaDexScraper::new()),
+            "mangack"  => Box::new(MangackScraper::new()),
+            other      => {
+                self.add_search_error = Some(format!("Unknown source: {other}"));
+                self.add_search_loading = false;
+                return Ok(());
+            }
+        };
+
+        let series = match scraper.get_series(&result.source_url).await {
+            Ok(s)  => s,
+            Err(e) => {
+                self.add_search_error   = Some(format!("Fetch failed: {e}"));
+                self.add_search_loading = false;
+                return Ok(());
+            }
+        };
+
+        match db::insert_manhwa_with_chapters(&self.pool, &series, &result.source).await {
+            Ok(_) => {
+                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.add_search_loading = false;
+                self.set_msg(format!("Added: {}", series.title));
+                // Reset search state and return to library
+                self.add_search_query   = String::new();
+                self.add_search_results = Vec::new();
+                self.add_search_sel     = 0;
+                self.add_search_input_active = true;
+                self.screen = crate::types::Screen::Library;
+            }
+            Err(e) => {
+                self.add_search_error   = Some(e.to_string());
+                self.add_search_loading = false;
+            }
+        }
+
         Ok(())
     }
 
