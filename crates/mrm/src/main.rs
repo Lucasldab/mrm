@@ -17,8 +17,11 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use app::App;
+use scraper::ScraperEvent;
 use types::AppEvent;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,28 @@ async fn main() -> Result<()> {
         Err(e) => { eprintln!("mrm: DB error: {e}"); return Err(e); }
     };
     startup_cleanup_tmp();
+
+    // Load config — non-fatal; coordinator will simply not start without it.
+    let config_opt = match config::load_config() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("mrm: config load failed ({e}), running without background polling");
+            None
+        }
+    };
+
+    // Set up coordinator channel and cancellation token.
+    let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
+    let shutdown = CancellationToken::new();
+
+    // Spawn coordinator only if config loaded successfully.
+    let coordinator_handle = config_opt.map(|cfg| {
+        let pool_c     = pool.clone();
+        let shutdown_c = shutdown.clone();
+        let tx_c       = scraper_tx.clone();
+        tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c))
+    });
+
     let mut app = match App::new(pool).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
@@ -111,12 +136,18 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut app).await;
+    let result = run_loop(&mut terminal, &mut app, scraper_rx).await;
 
     // Always restore terminal, even on error
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    // Graceful coordinator shutdown — cancel token then await the task.
+    shutdown.cancel();
+    if let Some(handle) = coordinator_handle {
+        let _ = handle.await;
+    }
 
     result
 }
@@ -124,6 +155,7 @@ async fn main() -> Result<()> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
+    mut scraper_rx: mpsc::Receiver<ScraperEvent>,
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -142,6 +174,13 @@ async fn run_loop(
                     }
                     Some(Err(e)) => return Err(e.into()),
                     _ => {}
+                }
+            }
+
+            // Scraper coordinator messages
+            msg = scraper_rx.recv() => {
+                if let Some(ev) = msg {
+                    app.handle_event(AppEvent::ScraperMsg(ev)).await?;
                 }
             }
 

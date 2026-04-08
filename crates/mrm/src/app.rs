@@ -115,6 +115,33 @@ impl App {
             AppEvent::DataRefreshed => {
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
             }
+            AppEvent::ScraperMsg(ev) => self.handle_scraper_event(ev).await?,
+        }
+        Ok(())
+    }
+
+    /// Handle a ScraperEvent from the background coordinator.
+    ///
+    /// Currently only NewChapters is defined. It triggers a full library
+    /// refresh so new chapters appear in the TUI without user action.
+    pub async fn handle_scraper_event(
+        &mut self,
+        event: crate::scraper::ScraperEvent,
+    ) -> Result<()> {
+        use crate::scraper::ScraperEvent;
+        match event {
+            ScraperEvent::NewChapters { titles } => {
+                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                if !titles.is_empty() {
+                    let count = titles.len();
+                    let preview = titles.first().map(|s| s.as_str()).unwrap_or("");
+                    if count == 1 {
+                        self.set_msg(format!("New chapters: {preview}"));
+                    } else {
+                        self.set_msg(format!("New chapters in {count} titles"));
+                    }
+                }
+            }
         }
         Ok(())
     }
