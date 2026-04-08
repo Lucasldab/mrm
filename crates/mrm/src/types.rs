@@ -159,4 +159,5 @@ pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
     Tick,
     DataRefreshed,
+    ScraperMsg(crate::scraper::ScraperEvent),
 }
