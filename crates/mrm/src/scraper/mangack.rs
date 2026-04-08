@@ -142,41 +142,8 @@ impl Scraper for MangackScraper {
         })
         .await?;
 
-        let document = Html::parse_document(&text);
-        let mut results = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        let results = parse_search_results(&text);
 
-        for element in document.select(&SEL_A_MANGA) {
-            let href = match element.value().attr("href") {
-                Some(h) => h.to_string(),
-                None => continue,
-            };
-
-            let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
-
-            // Skip if: title too short, already seen, or href has too few slashes
-            if title.is_empty() || title.len() < 2 || seen.contains(&href) {
-                continue;
-            }
-            if href.matches('/').count() < 4 {
-                continue;
-            }
-
-            seen.insert(href.clone());
-
-            // Look for a cover image in the parent or grandparent of <a>
-            let cover_url = find_cover_in_ancestors(&element);
-
-            results.push(SearchResult {
-                title,
-                cover_url,
-                source_url: href,
-                pub_status: "ongoing".into(), // not available on search page
-                source: "mangack".into(),
-            });
-        }
-
-        // Polite delay
         sleep(DELAY).await;
 
         Ok(results)
@@ -199,45 +166,12 @@ impl Scraper for MangackScraper {
         })
         .await?;
 
-        let document = Html::parse_document(&text);
-
-        // Title — first h1
-        let title = document
-            .select(&SEL_H1)
-            .next()
-            .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| anyhow!("MangaCK: no h1 title found at {source_url}"))?;
-
-        // Cover — first img[src*="wp-content/uploads"]
-        let cover_url = document
-            .select(&SEL_IMG_COVER)
-            .find_map(|el| {
-                el.value()
-                    .attr("src")
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-            });
-
-        // Status — find td/th whose text == "status", take its next sibling element
-        let pub_status = find_status(&document);
-
-        // Capture `now` ONCE before parsing chapters (consistent relative dates)
-        let now = chrono::Utc::now();
-
-        // Chapters
-        let mut chapters = parse_chapter_links(&document, now);
-        chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
+        let source_url_owned = source_url.to_string();
+        let series = parse_series_page(&text, &source_url_owned)?;
 
         sleep(DELAY).await;
 
-        Ok(SeriesData {
-            title,
-            cover_url,
-            source_url: source_url.to_string(),
-            pub_status,
-            chapters,
-        })
+        Ok(series)
     }
 
     /// Fetch ordered image URLs for a chapter from chapter_url.
@@ -257,49 +191,128 @@ impl Scraper for MangackScraper {
         })
         .await?;
 
-        let document = Html::parse_document(&text);
-        let mut urls = Vec::new();
-
-        for img in document.select(&SEL_IMG) {
-            let src = img
-                .value()
-                .attr("src")
-                .or_else(|| img.value().attr("data-src"))
-                .unwrap_or("")
-                .to_string();
-
-            if src.is_empty() || src.starts_with("data:") {
-                continue;
-            }
-
-            let low = src.to_lowercase();
-
-            // Keep only known image extensions
-            if !low.contains(".webp")
-                && !low.contains(".jpg")
-                && !low.contains(".jpeg")
-                && !low.contains(".png")
-            {
-                continue;
-            }
-
-            // Exclude logos, icons, avatars, banners, thumbnails
-            if low.contains("logo")
-                || low.contains("icon")
-                || low.contains("avatar")
-                || low.contains("banner")
-                || low.contains("thumb")
-            {
-                continue;
-            }
-
-            urls.push(src);
-        }
+        let urls = parse_chapter_images(&text);
 
         sleep(DELAY).await;
 
         Ok(urls)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sync parse functions (extracted so Html doesn't live in async fn bodies)
+// ---------------------------------------------------------------------------
+
+fn parse_search_results(html: &str) -> Vec<SearchResult> {
+    let document = Html::parse_document(html);
+    let mut results = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for element in document.select(&SEL_A_MANGA) {
+        let href = match element.value().attr("href") {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+
+        let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
+
+        if title.is_empty() || title.len() < 2 || seen.contains(&href) {
+            continue;
+        }
+        if href.matches('/').count() < 4 {
+            continue;
+        }
+
+        seen.insert(href.clone());
+
+        let cover_url = find_cover_in_ancestors(&element);
+
+        results.push(SearchResult {
+            title,
+            cover_url,
+            source_url: href,
+            pub_status: "ongoing".into(),
+            source: "mangack".into(),
+        });
+    }
+
+    results
+}
+
+fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
+    let document = Html::parse_document(html);
+
+    let title = document
+        .select(&SEL_H1)
+        .next()
+        .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| anyhow!("MangaCK: no h1 title found at {source_url}"))?;
+
+    let cover_url = document
+        .select(&SEL_IMG_COVER)
+        .find_map(|el| {
+            el.value()
+                .attr("src")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
+
+    let pub_status = find_status(&document);
+
+    let now = chrono::Utc::now();
+
+    let mut chapters = parse_chapter_links(&document, now);
+    chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(SeriesData {
+        title,
+        cover_url,
+        source_url: source_url.to_string(),
+        pub_status,
+        chapters,
+    })
+}
+
+fn parse_chapter_images(html: &str) -> Vec<String> {
+    let document = Html::parse_document(html);
+    let mut urls = Vec::new();
+
+    for img in document.select(&SEL_IMG) {
+        let src = img
+            .value()
+            .attr("src")
+            .or_else(|| img.value().attr("data-src"))
+            .unwrap_or("")
+            .to_string();
+
+        if src.is_empty() || src.starts_with("data:") {
+            continue;
+        }
+
+        let low = src.to_lowercase();
+
+        if !low.contains(".webp")
+            && !low.contains(".jpg")
+            && !low.contains(".jpeg")
+            && !low.contains(".png")
+        {
+            continue;
+        }
+
+        if low.contains("logo")
+            || low.contains("icon")
+            || low.contains("avatar")
+            || low.contains("banner")
+            || low.contains("thumb")
+        {
+            continue;
+        }
+
+        urls.push(src);
+    }
+
+    urls
 }
 
 // ---------------------------------------------------------------------------
