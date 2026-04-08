@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use crate::cover_cache::CoverCache;
-use crate::types::{AppEvent, Chapter, Manhwa, Screen, Status};
+use crate::types::{AppEvent, Chapter, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,7 @@ pub struct App {
     pub library_sel:   usize,
     pub search_query:  String,
     pub search_active: bool,
+    pub sort_mode:     SortMode,
 
     // Detail
     pub current_manhwa: Option<Manhwa>,
@@ -101,6 +102,7 @@ impl App {
             library_sel:      0,
             search_query:     String::new(),
             search_active:    false,
+            sort_mode:        SortMode::Title,
             current_manhwa:   None,
             chapter_list:     Vec::new(),
             chapter_sel:      0,
@@ -138,14 +140,26 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn visible_manhwa(&self) -> Vec<&Manhwa> {
-        if self.search_query.is_empty() {
+        let mut list: Vec<&Manhwa> = if self.search_query.is_empty() {
             self.manhwa_list.iter().collect()
         } else {
             let q = self.search_query.to_lowercase();
             self.manhwa_list.iter()
                 .filter(|m| m.title.to_lowercase().contains(&q))
                 .collect()
+        };
+
+        match self.sort_mode {
+            SortMode::Title => list.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            SortMode::Unread => list.sort_by(|a, b| b.unread.cmp(&a.unread).then(a.title.cmp(&b.title))),
+            SortMode::Status => list.sort_by(|a, b| {
+                let sa = a.status.sort_rank();
+                let sb = b.status.sort_rank();
+                sa.cmp(&sb).then(a.title.cmp(&b.title))
+            }),
         }
+
+        list
     }
 
     // -----------------------------------------------------------------------
@@ -305,6 +319,10 @@ impl App {
             self.add_search_sel = 0;
             self.add_search_input_active = true;
             self.screen = Screen::Search;
+        } else if k == self.keys.sort() {
+            self.sort_mode = self.sort_mode.next();
+            self.library_sel = 0;
+            self.set_msg(format!("Sort: {}", self.sort_mode.label()));
         } else if k == self.keys.delete() {
             if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
                 self.confirm_delete_id = Some(manhwa.id);

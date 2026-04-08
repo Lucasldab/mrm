@@ -38,7 +38,7 @@ impl Status {
     }
 
     /// Short label shown in the UI
-    pub fn label(&self, unread: u32) -> String {
+    pub fn label(&self, _unread: u32) -> String {
         match self {
             Self::LookedInto => "👀 Looked into".into(),
             Self::Reading    => "📖 Reading".into(),
@@ -52,6 +52,18 @@ impl Status {
     /// Label used when there are unread chapters after being up-to-date
     pub fn unread_label(unread: u32) -> String {
         format!("🔔 {} unread", unread)
+    }
+
+    /// Sort rank: Reading first, then UpToDate, etc.
+    pub fn sort_rank(&self) -> u8 {
+        match self {
+            Self::Reading    => 0,
+            Self::UpToDate   => 1,
+            Self::LookedInto => 2,
+            Self::Paused     => 3,
+            Self::Completed  => 4,
+            Self::Dropped    => 5,
+        }
     }
 
     pub fn all() -> &'static [Status] {
@@ -69,6 +81,39 @@ impl Status {
 impl std::fmt::Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label(0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manhwa
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Sort mode for library view
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SortMode {
+    Title,
+    Unread,
+    Status,
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Title  => Self::Unread,
+            Self::Unread => Self::Status,
+            Self::Status => Self::Title,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Title  => "Title",
+            Self::Unread => "Unread",
+            Self::Status => "Status",
+        }
     }
 }
 

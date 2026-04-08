@@ -8,7 +8,7 @@ use ratatui::{
 use ratatui_image::StatefulImage;
 
 use crate::app::App;
-use crate::types::Status;
+
 
 // Each grid cell: cover image + title + status line
 const CELL_WIDTH: u16 = 22;  // columns per cell
@@ -17,7 +17,7 @@ const IMG_WIDTH: u16 = 18;   // image width within cell (centered)
 const IMG_HEIGHT: u16 = 12;  // fixed image height
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let area = f.size();
+    let area = f.area();
 
     // Split: main grid | right sidebar (keybinds)
     let cols = Layout::default()
@@ -320,6 +320,10 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("delete"),
         ]),
         Line::from(vec![
+            Span::styled(format!(" {}    ", keys.sort), key_style),
+            Span::raw("sort"),
+        ]),
+        Line::from(vec![
             Span::styled(" q    ", key_style),
             Span::raw("quit"),
         ]),
@@ -335,7 +339,7 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_delete_confirm(f: &mut Frame, app: &App) {
-    let area = f.size();
+    let area = f.area();
     let popup = centered_rect(50, 25, area);
 
     let title = app.confirm_delete_id

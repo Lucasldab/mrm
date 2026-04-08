@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::App;
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let area = f.size();
+    let area = f.area();
     let theme = &app.theme;
     let keys = &app.keys;
 

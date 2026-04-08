@@ -134,8 +134,8 @@ async fn main() -> Result<()> {
 
     // Detect terminal graphics protocol and font size.
     let picker = {
-        let mut p = ratatui_image::picker::Picker::from_query_stdio()
-            .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        let p = ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
         use std::io::Write;
         let _ = std::io::stdout().flush();
         Some(p)

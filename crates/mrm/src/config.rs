@@ -75,6 +75,9 @@ pub struct KeysConfig {
 
     // Search results
     pub input_mode:   String,
+
+    // Library sort
+    pub sort:         String,
 }
 
 impl Default for KeysConfig {
@@ -97,6 +100,7 @@ impl Default for KeysConfig {
             next_chapter:   "]".into(),
             prev_chapter:   "[".into(),
             input_mode:     "i".into(),
+            sort:           "o".into(),
         }
     }
 }
@@ -135,6 +139,7 @@ impl KeysConfig {
     pub fn next_chapter(&self)   -> KeyCode { Self::parse_key(&self.next_chapter) }
     pub fn prev_chapter(&self)   -> KeyCode { Self::parse_key(&self.prev_chapter) }
     pub fn input_mode(&self)     -> KeyCode { Self::parse_key(&self.input_mode) }
+    pub fn sort(&self)           -> KeyCode { Self::parse_key(&self.sort) }
 }
 
 // ---------------------------------------------------------------------------

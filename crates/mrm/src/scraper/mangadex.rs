@@ -36,8 +36,13 @@ pub struct MangaDexScraper {
 
 impl MangaDexScraper {
     pub fn new() -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("Accept", "application/json".parse().unwrap());
+
         Self {
             client: reqwest::Client::builder()
+                .user_agent("mrm/0.1 (https://github.com/Lucasldab/mrm)")
+                .default_headers(headers)
                 .timeout(Duration::from_secs(20))
                 .build()
                 .expect("reqwest client build failed"),
@@ -119,6 +124,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
+            let r = r.error_for_status()
+                .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
                 .with_context(|| format!("MangaDex GET {url} JSON parse failed"))
@@ -162,6 +169,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
+            let r = r.error_for_status()
+                .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
                 .with_context(|| format!("MangaDex GET {url} JSON parse failed"))
@@ -195,6 +204,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
+            let r = r.error_for_status()
+                .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
                 .with_context(|| format!("MangaDex GET {url} JSON parse failed"))

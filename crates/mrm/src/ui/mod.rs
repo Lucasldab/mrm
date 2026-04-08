@@ -31,7 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------------------
 
 fn draw_reader(f: &mut Frame, app: &App) {
-    let area = f.size();
+    let area = f.area();
     let theme = &app.theme;
     let keys = &app.keys;
 
@@ -98,7 +98,7 @@ fn draw_reader(f: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn draw_status_picker(f: &mut Frame, app: &App) {
-    let area    = f.size();
+    let area    = f.area();
     let popup   = centered_rect(40, 60, area);
     let options = Status::all();
     let theme = &app.theme;
