@@ -1,0 +1,548 @@
+//! MangaCK scraper — full implementation of the Scraper trait.
+//!
+//! Ports the Python `scraper/scrapers/mangack.py` to Rust faithfully,
+//! replicating CSS selector logic, relative date parsing, chapter number
+//! extraction with regex fallback, nav button filtering, and image URL filtering.
+//!
+//! Site structure (WordPress theme):
+//!   Series URL  : {base}/manga/{slug}/
+//!   Chapter URL : {base}/chapter/{slug}-chapter-{n}/
+//!   Search URL  : {base}/?s={query}
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use scraper::{Html, Selector};
+use std::collections::HashSet;
+use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::time::sleep;
+
+use super::{ChapterData, Scraper, SearchResult, SeriesData};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const BASE: &str = "https://mangack.com";
+const DELAY: Duration = Duration::from_millis(500);
+
+// Nav button labels to skip (not real chapters)
+static NAV_LABELS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    let mut s = HashSet::new();
+    s.insert("first chapter");
+    s.insert("last chapter");
+    s.insert("first");
+    s.insert("last");
+    s
+});
+
+// Compiled selectors (lazy, compiled once)
+static SEL_A_MANGA: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(r#"a[href*="/manga/"]"#).unwrap());
+static SEL_IMG: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("img").unwrap());
+static SEL_H1: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("h1").unwrap());
+static SEL_IMG_COVER: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(r#"img[src*="wp-content/uploads"]"#).unwrap());
+static SEL_TD_TH: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("td, th").unwrap());
+static SEL_A_CHAPTER: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(r#"a[href*="/chapter/"]"#).unwrap());
+
+// Compiled regex patterns (lazy, compiled once)
+static RE_NEW_BADGE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\s*NEW\s*$").unwrap());
+static RE_CHAPTER_NUM: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)chapter[-\s]*([\d]+(?:[._][\d]+)?)").unwrap());
+static RE_MINUTE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+minute").unwrap());
+static RE_HOUR: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+hour").unwrap());
+static RE_DAY: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+day").unwrap());
+static RE_WEEK: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+week").unwrap());
+static RE_MONTH: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+month").unwrap());
+static RE_YEAR: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d+)\s+year").unwrap());
+
+// ---------------------------------------------------------------------------
+// Status normalisation
+// ---------------------------------------------------------------------------
+
+fn normalize_status(raw: &str) -> String {
+    match raw.to_lowercase().trim() {
+        "ongoing"              => "ongoing",
+        "hiatus"               => "hiatus",
+        "completed" | "complete" => "completed",
+        _                      => "ongoing",
+    }
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Struct + constructor
+// ---------------------------------------------------------------------------
+
+pub struct MangackScraper {
+    client: reqwest::Client,
+}
+
+impl MangackScraper {
+    pub fn new() -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Accept-Language",
+            "en-US,en;q=0.9".parse().unwrap(),
+        );
+
+        Self {
+            client: reqwest::Client::builder()
+                .user_agent(
+                    "Mozilla/5.0 (X11; Linux x86_64) \
+                     AppleWebKit/537.36 (KHTML, like Gecko) \
+                     Chrome/124.0.0.0 Safari/537.36",
+                )
+                .default_headers(headers)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .timeout(Duration::from_secs(20))
+                .build()
+                .expect("reqwest client build failed"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scraper trait implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl Scraper for MangackScraper {
+    fn source_name(&self) -> &'static str {
+        "mangack"
+    }
+
+    /// Search via GET /?s=query — returns /manga/ links from results page.
+    async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
+        let url = format!("{BASE}/");
+        let client = &self.client;
+
+        let text = super::retry(|| async {
+            let r = client
+                .get(&url)
+                .query(&[("s", query)])
+                .send()
+                .await
+                .with_context(|| format!("MangaCK GET {url}?s={query} failed"))?;
+            r.text()
+                .await
+                .with_context(|| format!("MangaCK GET {url} body read failed"))
+        })
+        .await?;
+
+        let document = Html::parse_document(&text);
+        let mut results = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for element in document.select(&SEL_A_MANGA) {
+            let href = match element.value().attr("href") {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+
+            let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
+
+            // Skip if: title too short, already seen, or href has too few slashes
+            if title.is_empty() || title.len() < 2 || seen.contains(&href) {
+                continue;
+            }
+            if href.matches('/').count() < 4 {
+                continue;
+            }
+
+            seen.insert(href.clone());
+
+            // Look for a cover image in the parent or grandparent of <a>
+            let cover_url = find_cover_in_ancestors(&element);
+
+            results.push(SearchResult {
+                title,
+                cover_url,
+                source_url: href,
+                pub_status: "ongoing".into(), // not available on search page
+                source: "mangack".into(),
+            });
+        }
+
+        // Polite delay
+        sleep(DELAY).await;
+
+        Ok(results)
+    }
+
+    /// Fetch series metadata and full chapter list from source_url.
+    async fn get_series(&self, source_url: &str) -> Result<SeriesData> {
+        let client = &self.client;
+        let url = source_url.to_string();
+
+        let text = super::retry(|| async {
+            let r = client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("MangaCK GET {url} failed"))?;
+            r.text()
+                .await
+                .with_context(|| format!("MangaCK GET {url} body read failed"))
+        })
+        .await?;
+
+        let document = Html::parse_document(&text);
+
+        // Title — first h1
+        let title = document
+            .select(&SEL_H1)
+            .next()
+            .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| anyhow!("MangaCK: no h1 title found at {source_url}"))?;
+
+        // Cover — first img[src*="wp-content/uploads"]
+        let cover_url = document
+            .select(&SEL_IMG_COVER)
+            .find_map(|el| {
+                el.value()
+                    .attr("src")
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            });
+
+        // Status — find td/th whose text == "status", take its next sibling element
+        let pub_status = find_status(&document);
+
+        // Capture `now` ONCE before parsing chapters (consistent relative dates)
+        let now = chrono::Utc::now();
+
+        // Chapters
+        let mut chapters = parse_chapter_links(&document, now);
+        chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
+
+        sleep(DELAY).await;
+
+        Ok(SeriesData {
+            title,
+            cover_url,
+            source_url: source_url.to_string(),
+            pub_status,
+            chapters,
+        })
+    }
+
+    /// Fetch ordered image URLs for a chapter from chapter_url.
+    async fn get_chapter_image_urls(&self, chapter_url: &str) -> Result<Vec<String>> {
+        let client = &self.client;
+        let url = chapter_url.to_string();
+
+        let text = super::retry(|| async {
+            let r = client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("MangaCK GET {url} failed"))?;
+            r.text()
+                .await
+                .with_context(|| format!("MangaCK GET {url} body read failed"))
+        })
+        .await?;
+
+        let document = Html::parse_document(&text);
+        let mut urls = Vec::new();
+
+        for img in document.select(&SEL_IMG) {
+            let src = img
+                .value()
+                .attr("src")
+                .or_else(|| img.value().attr("data-src"))
+                .unwrap_or("")
+                .to_string();
+
+            if src.is_empty() || src.starts_with("data:") {
+                continue;
+            }
+
+            let low = src.to_lowercase();
+
+            // Keep only known image extensions
+            if !low.contains(".webp")
+                && !low.contains(".jpg")
+                && !low.contains(".jpeg")
+                && !low.contains(".png")
+            {
+                continue;
+            }
+
+            // Exclude logos, icons, avatars, banners, thumbnails
+            if low.contains("logo")
+                || low.contains("icon")
+                || low.contains("avatar")
+                || low.contains("banner")
+                || low.contains("thumb")
+            {
+                continue;
+            }
+
+            urls.push(src);
+        }
+
+        sleep(DELAY).await;
+
+        Ok(urls)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: find_status
+// ---------------------------------------------------------------------------
+
+fn find_status(document: &Html) -> String {
+    for element in document.select(&SEL_TD_TH) {
+        let text: String = element
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_lowercase();
+
+        if text == "status" {
+            // Walk next siblings to find the first Element node
+            for sibling in element.next_siblings() {
+                if let scraper::node::Node::Element(_) = sibling.value() {
+                    let sibling_ref = scraper::ElementRef::wrap(sibling).unwrap();
+                    let raw = sibling_ref
+                        .text()
+                        .collect::<Vec<_>>()
+                        .join("")
+                        .trim()
+                        .to_string();
+                    return normalize_status(&raw);
+                }
+            }
+            break;
+        }
+    }
+    "ongoing".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: find_cover_in_ancestors
+// ---------------------------------------------------------------------------
+
+fn find_cover_in_ancestors(element: &scraper::ElementRef<'_>) -> Option<String> {
+    let parent = element.parent()?;
+    let parent_ref = scraper::ElementRef::wrap(parent);
+
+    let grandparent = parent.parent();
+    let grandparent_ref = grandparent.and_then(scraper::ElementRef::wrap);
+
+    for ancestor in [parent_ref, grandparent_ref].into_iter().flatten() {
+        if let Some(img) = ancestor.select(&SEL_IMG).next() {
+            let src = img
+                .value()
+                .attr("src")
+                .or_else(|| img.value().attr("data-src"));
+            if let Some(s) = src {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: parse_chapter_links
+// ---------------------------------------------------------------------------
+
+fn parse_chapter_links(
+    document: &Html,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<ChapterData> {
+    let mut chapters = Vec::new();
+    let mut seen_numbers: HashSet<u64> = HashSet::new();
+
+    for element in document.select(&SEL_A_CHAPTER) {
+        let href = match element.value().attr("href") {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+
+        let raw_label: String = element
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
+
+        // Skip quick-nav buttons ("First Chapter" / "Last Chapter" etc.)
+        if NAV_LABELS.contains(raw_label.to_lowercase().as_str()) {
+            continue;
+        }
+
+        // Strip "NEW" badge
+        let label = RE_NEW_BADGE
+            .replace(&raw_label, "")
+            .trim()
+            .to_string();
+
+        // Extract chapter number — skip if cannot determine
+        let number = match extract_chapter_number(&label, &href) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Deduplicate by number using bit representation
+        let key = number.to_bits();
+        if seen_numbers.contains(&key) {
+            continue;
+        }
+        seen_numbers.insert(key);
+
+        // Date: get all text from parent, subtract the chapter label and "NEW"
+        let released_at = extract_chapter_date(&element, &raw_label, now);
+
+        let title = if label.is_empty() { None } else { Some(label) };
+
+        chapters.push(ChapterData {
+            number,
+            title,
+            url: href,
+            released_at,
+        });
+    }
+
+    chapters
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: extract_chapter_date
+// ---------------------------------------------------------------------------
+
+fn extract_chapter_date(
+    element: &scraper::ElementRef<'_>,
+    raw_label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let parent = element.parent()?;
+    let parent_ref = scraper::ElementRef::wrap(parent)?;
+
+    let full_text: String = parent_ref
+        .text()
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string();
+
+    let date_text = full_text
+        .replace(raw_label, "")
+        .replace("NEW", "")
+        .trim()
+        .to_string();
+
+    if date_text.is_empty() {
+        return None;
+    }
+
+    parse_relative_date(&date_text, now)
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: extract_chapter_number
+// ---------------------------------------------------------------------------
+
+fn extract_chapter_number(label: &str, url: &str) -> Option<f64> {
+    let label_match = RE_CHAPTER_NUM.captures(label).and_then(|cap| {
+        let s = cap[1].replace('_', ".");
+        s.parse::<f64>().ok()
+    });
+
+    let url_match = RE_CHAPTER_NUM.captures(url).and_then(|cap| {
+        let s = cap[1].replace('_', ".");
+        s.parse::<f64>().ok()
+    });
+
+    match (label_match, url_match) {
+        (Some(ln), Some(un)) => {
+            if (ln - un).abs() > 1.0 {
+                tracing::warn!(
+                    "MangaCK: label/URL chapter number mismatch for '{}' at {}",
+                    label,
+                    url
+                );
+            }
+            Some(ln)
+        }
+        (Some(ln), None) => Some(ln),
+        (None, Some(un)) => {
+            tracing::warn!(
+                "MangaCK: falling back to URL regex for chapter number — label='{}' url='{}'",
+                label,
+                url
+            );
+            Some(un)
+        }
+        (None, None) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: parse_relative_date
+// ---------------------------------------------------------------------------
+
+fn parse_relative_date(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let s = raw.to_lowercase();
+
+    // Relative date patterns — try each in order
+    if let Some(cap) = RE_MINUTE.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::minutes(n);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+    if let Some(cap) = RE_HOUR.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::hours(n);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+    if let Some(cap) = RE_DAY.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::days(n);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+    if let Some(cap) = RE_WEEK.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::weeks(n);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+    if let Some(cap) = RE_MONTH.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::days(n * 30);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+    if let Some(cap) = RE_YEAR.captures(&s) {
+        let n: i64 = cap[1].parse().ok()?;
+        let dt = now - chrono::Duration::days(n * 365);
+        return Some(dt.format("%Y-%m-%d").to_string());
+    }
+
+    // Absolute date fallbacks — try common formats
+    for fmt in ["%B %d, %Y", "%Y-%m-%d", "%b %d, %Y"] {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(raw.trim(), fmt) {
+            return Some(dt.format("%Y-%m-%d").to_string());
+        }
+    }
+
+    None
+}

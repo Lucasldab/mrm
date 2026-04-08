@@ -103,6 +103,9 @@ where
 pub mod mangadex;   // Plan 02
 pub use mangadex::MangaDexScraper;
 
+pub mod mangack;    // Phase 3 Plan 01
+pub use mangack::MangackScraper;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
