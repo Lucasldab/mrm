@@ -2,7 +2,6 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc;
-use futures::future::join_all;
 
 use crate::types::{AppEvent, Chapter, Manhwa, Screen, Status};
 use crate::db;
@@ -39,6 +38,7 @@ pub struct App {
     pub imv_process:     Option<std::process::Child>,
     pub imv_pid:         Option<u32>,
     pub imv_loaded_count: usize,
+    pub error_rx:        Option<mpsc::Receiver<String>>,
 
     pub status_msg: Option<String>,
 }
@@ -66,6 +66,7 @@ impl App {
             imv_process:      None,
             imv_pid:          None,
             imv_loaded_count: 0,
+            error_rx:         None,
             status_msg:       None,
         })
     }
@@ -291,12 +292,11 @@ impl App {
                 .map(|m| m.source.clone()).unwrap_or_default();
             let url = ch.url.clone();
             let (tx, rx) = mpsc::channel::<Option<(usize, std::path::PathBuf)>>(32);
-            self.image_rx = Some(rx);
+            let (err_tx, err_rx) = mpsc::channel::<String>(4);
+            self.image_rx  = Some(rx);
+            self.error_rx  = Some(err_rx);
             tokio::spawn(async move {
-                if let Err(e) = fetch_chapter_images(&source, &url, tx.clone()).await {
-                    eprintln!("image fetch error: {e}");
-                }
-                let _ = tx.send(None).await;
+                fetch_chapter_images(&source, &url, tx, err_tx).await;
             });
         }
         Ok(())
@@ -341,11 +341,19 @@ impl App {
                 self.imv_pid        = None;
                 self.images_loading = false;
                 self.image_rx       = None;
+                self.error_rx       = None;
                 return;
             }
         }
 
         if !self.images_loading { return; }
+
+        // Drain error channel — route errors to TUI status bar
+        if let Some(err_rx) = &mut self.error_rx {
+            while let Ok(msg) = err_rx.try_recv() {
+                self.status_msg = Some(msg);
+            }
+        }
 
         let mut done = false;
         if let Some(rx) = &mut self.image_rx {
@@ -389,7 +397,8 @@ impl App {
 
         if done {
             self.images_loading = false;
-            self.image_rx = None;
+            self.image_rx       = None;
+            self.error_rx       = None;
         }
     }
 
@@ -474,72 +483,81 @@ async fn fetch_chapter_images(
     source: &str,
     chapter_url: &str,
     tx: mpsc::Sender<Option<(usize, std::path::PathBuf)>>,
-) -> Result<()> {
-    let root = find_project_root();
-    let venv_python = root.join("scraper/.venv/bin/python");
-    let python = if venv_python.exists() {
-        venv_python.to_string_lossy().into_owned()
-    } else {
-        "python".to_string()
+    err_tx: mpsc::Sender<String>,
+) {
+    use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    use tokio::task::JoinSet;
+
+    // Build a Box<dyn Scraper> from source name
+    let scraper: Box<dyn Scraper> = match source {
+        "mangadex" => Box::new(MangaDexScraper::new()),
+        "mangack"  => Box::new(MangackScraper::new()),
+        other => {
+            let _ = err_tx.send(format!("Unknown source: {other}")).await;
+            let _ = tx.send(None).await;
+            return;
+        }
     };
 
-    let output = tokio::process::Command::new(&python)
-        .args(["-m", "scraper.get_images", source, chapter_url])
-        .current_dir(&root)
-        .output()
-        .await?;
+    // Fetch image URLs (with the scraper's built-in retry)
+    let urls = match scraper.get_chapter_image_urls(chapter_url).await {
+        Ok(u) => u,
+        Err(e) => {
+            let _ = err_tx.send(format!("Could not load chapter: {e}")).await;
+            let _ = tx.send(None).await;
+            return;
+        }
+    };
 
-    if !output.status.success() {
-        anyhow::bail!("scraper error: {}", String::from_utf8_lossy(&output.stderr));
+    let total = urls.len();
+    if total == 0 {
+        let _ = err_tx.send("Chapter has no images".into()).await;
+        let _ = tx.send(None).await;
+        return;
     }
 
-    let urls: Vec<String> = serde_json::from_slice(&output.stdout)?;
-    let client = std::sync::Arc::new(
+    let client = Arc::new(
         reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-            .build()?
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("reqwest client"),
     );
+    let sem = Arc::new(Semaphore::new(4));
 
-    let mut idx = 0usize;
-    for chunk in urls.chunks(4) {
-        let chunk_start = idx;
-        let futs: Vec<_> = chunk.iter().enumerate().map(|(i, url)| {
-            let client = client.clone();
-            let url    = url.clone();
-            let page   = chunk_start + i;
-            async move {
-                let bytes = client.get(&url).send().await?.bytes().await?;
-                let img   = image::load_from_memory(&bytes)?;
-                anyhow::Ok((page, img))
-            }
-        }).collect();
+    let mut set: JoinSet<Option<(usize, std::path::PathBuf)>> = JoinSet::new();
 
-        for result in join_all(futs).await {
-            match result {
-                Ok((page, img)) => {
-                    let path = std::env::temp_dir().join(format!("mrm_page_{page}.png"));
-                    if img.save(&path).is_ok() {
-                        let _ = tx.send(Some((page, path))).await;
-                    }
-                }
-                Err(e) => eprintln!("image download error: {e}"),
+    for (page, url) in urls.into_iter().enumerate() {
+        let client = client.clone();
+        let sem    = sem.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            let bytes = client.get(&url).send().await.ok()?.bytes().await.ok()?;
+            let img   = image::load_from_memory(&bytes).ok()?;
+            let path  = std::env::temp_dir().join(format!("mrm_page_{page}.png"));
+            img.save(&path).ok()?;
+            Some((page, path))
+        });
+    }
+
+    // Collect results as they complete (streaming, not batch)
+    let mut failures = 0usize;
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(Some((page, path))) => {
+                let _ = tx.send(Some((page, path))).await;
             }
+            _ => { failures += 1; }
         }
-        idx += chunk.len();
     }
 
-    Ok(())
-}
-
-fn find_project_root() -> std::path::PathBuf {
-    let mut dir = std::env::current_exe()
-        .unwrap_or_default()
-        .parent()
-        .unwrap_or(&std::path::Path::new("."))
-        .to_path_buf();
-    for _ in 0..6 {
-        if dir.join("scraper").exists() { return dir; }
-        if let Some(p) = dir.parent() { dir = p.to_path_buf(); } else { break; }
+    if failures > total / 2 {
+        let _ = err_tx.send(
+            format!("Chapter load degraded: {failures}/{total} pages failed")
+        ).await;
     }
-    std::path::PathBuf::from(".")
+
+    let _ = tx.send(None).await;
 }
