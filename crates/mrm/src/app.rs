@@ -1,10 +1,26 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sqlx::sqlite::SqlitePool;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use crate::types::{AppEvent, Chapter, Manhwa, Screen, Status};
 use crate::db;
+
+// ---------------------------------------------------------------------------
+// ManagedChild — kills imv on drop (prevents orphan processes)
+// ---------------------------------------------------------------------------
+
+/// Wrapper around std::process::Child that kills the process on drop.
+/// Prevents imv from becoming an orphan when the TUI exits or panics.
+pub(crate) struct ManagedChild(std::process::Child);
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // App state
@@ -35,9 +51,10 @@ pub struct App {
     pub image_paths:     Vec<std::path::PathBuf>,
     pub image_rx:        Option<mpsc::Receiver<Option<(usize, std::path::PathBuf)>>>,
     pub image_pending:   Vec<(usize, std::path::PathBuf)>,
-    pub imv_process:     Option<std::process::Child>,
+    pub imv_process:     Option<ManagedChild>,
     pub imv_pid:         Option<u32>,
     pub imv_loaded_count: usize,
+    pub session_dir:     Option<TempDir>,
     pub error_rx:        Option<mpsc::Receiver<String>>,
 
     pub status_msg: Option<String>,
@@ -66,6 +83,7 @@ impl App {
             imv_process:      None,
             imv_pid:          None,
             imv_loaded_count: 0,
+            session_dir:      None,
             error_rx:         None,
             status_msg:       None,
         })
@@ -295,8 +313,19 @@ impl App {
             let (err_tx, err_rx) = mpsc::channel::<String>(4);
             self.image_rx  = Some(rx);
             self.error_rx  = Some(err_rx);
+
+            // Create a unique session directory for this chapter's images
+            let session_dir = tempfile::Builder::new()
+                .prefix("mrm_")
+                .tempdir()
+                .ok();
+            let session_path = session_dir.as_ref()
+                .map(|d| d.path().to_path_buf())
+                .unwrap_or_else(std::env::temp_dir);
+            self.session_dir = session_dir;
+
             tokio::spawn(async move {
-                fetch_chapter_images(&source, &url, tx, err_tx).await;
+                fetch_chapter_images(&source, &url, session_path, tx, err_tx).await;
             });
         }
         Ok(())
@@ -335,8 +364,8 @@ impl App {
 
     pub fn poll_images(&mut self) {
         // If imv was closed by the user, stop loading
-        if let Some(child) = &mut self.imv_process {
-            if let Ok(Some(_)) = child.try_wait() {
+        if let Some(managed) = &mut self.imv_process {
+            if let Ok(Some(_)) = managed.0.try_wait() {
                 self.imv_process    = None;
                 self.imv_pid        = None;
                 self.images_loading = false;
@@ -424,19 +453,18 @@ h = pan 50 0\nl = pan -50 0\n<Up> = zoom 1\n<Down> = zoom -1\nf = fullscreen\n\
             .spawn()
         {
             Ok(child) => {
-                self.imv_pid          = Some(child.id());
+                let pid = child.id();
+                self.imv_pid          = Some(pid);
                 self.imv_loaded_count = self.image_paths.len();
-                self.imv_process      = Some(child);
+                self.imv_process      = Some(ManagedChild(child));
             }
             Err(e) => self.set_msg(format!("imv error: {e}")),
         }
     }
 
     fn kill_imv(&mut self) {
-        if let Some(mut child) = self.imv_process.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.imv_process      = None;  // Drop kills imv
+        self.session_dir      = None;  // Drop + TempDir deletes /tmp/mrm_*/
         self.imv_pid          = None;
         self.imv_loaded_count = 0;
         self.update_read_progress_sync();
@@ -482,6 +510,7 @@ h = pan 50 0\nl = pan -50 0\n<Up> = zoom 1\n<Down> = zoom -1\nf = fullscreen\n\
 async fn fetch_chapter_images(
     source: &str,
     chapter_url: &str,
+    session_dir: std::path::PathBuf,
     tx: mpsc::Sender<Option<(usize, std::path::PathBuf)>>,
     err_tx: mpsc::Sender<String>,
 ) {
@@ -530,13 +559,14 @@ async fn fetch_chapter_images(
     let mut set: JoinSet<Option<(usize, std::path::PathBuf)>> = JoinSet::new();
 
     for (page, url) in urls.into_iter().enumerate() {
-        let client = client.clone();
-        let sem    = sem.clone();
+        let client      = client.clone();
+        let sem         = sem.clone();
+        let session_dir = session_dir.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
             let bytes = client.get(&url).send().await.ok()?.bytes().await.ok()?;
             let img   = image::load_from_memory(&bytes).ok()?;
-            let path  = std::env::temp_dir().join(format!("mrm_page_{page}.png"));
+            let path  = session_dir.join(format!("page_{page}.png"));
             img.save(&path).ok()?;
             Some((page, path))
         });

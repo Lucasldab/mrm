@@ -23,4 +23,5 @@ sqlx       = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls"
 tokio      = { version = "1", features = ["full"] }
 scraper    = "0.22"
 regex      = "1"
+tempfile   = "3"
 tracing    = "0.1"
