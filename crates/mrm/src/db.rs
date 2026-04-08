@@ -164,6 +164,70 @@ pub async fn fetch_chapters(pool: &SqlitePool, manhwa_id: i64) -> Result<Vec<Cha
 }
 
 // ---------------------------------------------------------------------------
+// Chapter upsert (coordinator writes)
+// ---------------------------------------------------------------------------
+
+/// Upsert a batch of chapters for a manhwa.
+///
+/// Each chapter is inserted with ON CONFLICT(manhwa_id, number) DO UPDATE
+/// so title/url/released_at are refreshed even for known chapters.
+///
+/// Returns the count of chapters that are genuinely new — defined as having
+/// no entry in the progress table (i.e., the user has never started them).
+/// This count is used to decide whether to send a desktop notification.
+pub async fn upsert_chapters(
+    pool: &SqlitePool,
+    manhwa_id: i64,
+    chapters: &[crate::scraper::ChapterData],
+) -> Result<usize> {
+    if chapters.is_empty() {
+        return Ok(0);
+    }
+
+    let mut new_count = 0usize;
+
+    for ch in chapters {
+        // Upsert the chapter row; RETURNING gives us the row id.
+        let row = sqlx::query(
+            r#"
+            INSERT INTO chapter (manhwa_id, number, title, url, released_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(manhwa_id, number) DO UPDATE SET
+                title       = excluded.title,
+                url         = excluded.url,
+                released_at = excluded.released_at
+            RETURNING id
+            "#,
+        )
+        .bind(manhwa_id)
+        .bind(ch.number)
+        .bind(&ch.title)
+        .bind(&ch.url)
+        .bind(&ch.released_at)
+        .fetch_one(pool)
+        .await?;
+
+        let chapter_id: i64 = row.try_get("id")?;
+
+        // A chapter is "new" if the user has no progress record for it.
+        let has_progress: bool = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM progress WHERE chapter_id = ?)",
+        )
+        .bind(chapter_id)
+        .fetch_one(pool)
+        .await?
+        .try_get::<bool, _>(0)
+        .unwrap_or(false);
+
+        if !has_progress {
+            new_count += 1;
+        }
+    }
+
+    Ok(new_count)
+}
+
+// ---------------------------------------------------------------------------
 // Progress queries
 // ---------------------------------------------------------------------------
 
