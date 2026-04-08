@@ -125,6 +125,95 @@ pub async fn set_manhwa_status(
     Ok(())
 }
 
+/// Insert a new manhwa and all its chapters in a single transaction.
+///
+/// Returns the new manhwa row id.
+/// Returns Err if a manhwa with the same source_url already exists.
+pub async fn insert_manhwa_with_chapters(
+    pool: &SqlitePool,
+    series: &crate::scraper::SeriesData,
+    source: &str,
+) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+
+    // Check for duplicate source_url
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = ?)",
+    )
+    .bind(&series.source_url)
+    .fetch_one(&mut *tx)
+    .await?
+    .try_get::<bool, _>(0)
+    .unwrap_or(false);
+
+    if exists {
+        return Err(anyhow::anyhow!("Already in library: {}", series.title));
+    }
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO manhwa (title, source, source_url, cover_url, pub_status,
+                            status, status_override, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'looked_into', 0, CURRENT_TIMESTAMP)
+        RETURNING id
+        "#,
+    )
+    .bind(&series.title)
+    .bind(source)
+    .bind(&series.source_url)
+    .bind(&series.cover_url)
+    .bind(&series.pub_status)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let manhwa_id: i64 = row.try_get("id")?;
+
+    // Upsert all chapters within the same transaction
+    for ch in &series.chapters {
+        sqlx::query(
+            r#"
+            INSERT INTO chapter (manhwa_id, number, title, url, released_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(manhwa_id, number) DO UPDATE SET
+                title       = excluded.title,
+                url         = excluded.url,
+                released_at = excluded.released_at
+            "#,
+        )
+        .bind(manhwa_id)
+        .bind(ch.number)
+        .bind(&ch.title)
+        .bind(&ch.url)
+        .bind(&ch.released_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(manhwa_id)
+}
+
+/// Delete a manhwa and all associated chapters and progress records.
+/// Relies on ON DELETE CASCADE (confirmed in schema).
+pub async fn delete_manhwa(pool: &SqlitePool, manhwa_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM manhwa WHERE id = ?")
+        .bind(manhwa_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clear the status override for a manhwa, re-enabling auto-computation.
+pub async fn clear_status_override(pool: &SqlitePool, manhwa_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE manhwa SET status_override = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(manhwa_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Chapter queries
 // ---------------------------------------------------------------------------
