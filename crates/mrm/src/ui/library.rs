@@ -46,6 +46,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Right sidebar: keybinds
     draw_keybinds(f, cols[1]);
+
+    // Delete confirmation overlay
+    if app.confirm_delete_id.is_some() {
+        draw_delete_confirm(f, app);
+    }
 }
 
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
@@ -142,7 +147,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let msg = app
         .status_msg
         .as_deref()
-        .unwrap_or("j/k move  Enter open  / search  q quit");
+        .unwrap_or("j/k move  Enter open  / search  a add  d delete  q quit");
 
     let bar = Paragraph::new(msg).style(
         Style::default()
@@ -188,6 +193,10 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
             Span::raw("add manhwa"),
         ]),
         Line::from(vec![
+            Span::styled(" d    ", Style::default().fg(Color::Yellow)),
+            Span::raw("delete"),
+        ]),
+        Line::from(vec![
             Span::styled(" q    ", Style::default().fg(Color::Yellow)),
             Span::raw("quit"),
         ]),
@@ -200,4 +209,54 @@ fn draw_keybinds(f: &mut Frame, area: Rect) {
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
+}
+
+fn draw_delete_confirm(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+
+    let area  = f.size();
+    let popup = centered_rect(50, 25, area);
+
+    let title = app.confirm_delete_id
+        .and_then(|id| app.manhwa_list.iter().find(|m| m.id == id))
+        .map(|m| m.title.as_str())
+        .unwrap_or("this manhwa");
+
+    let text = format!(
+        "\n  Delete \"{}\"?\n\n  This removes all chapters and reading progress.\n\n  Press d to confirm  |  Esc to cancel",
+        title
+    );
+
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Confirm Delete ")
+                    .border_style(Style::default().fg(Color::Red)),
+            )
+            .style(Style::default().fg(Color::White)),
+        popup,
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

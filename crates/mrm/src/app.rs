@@ -66,6 +66,9 @@ pub struct App {
     pub add_search_loading:      bool,
     pub add_search_error:        Option<String>,
     pub add_search_input_active: bool,  // true = typing mode, false = browsing results
+
+    // Delete confirmation
+    pub confirm_delete_id: Option<i64>,  // Some(id) = waiting for confirmation keypress
 }
 
 impl App {
@@ -100,6 +103,7 @@ impl App {
             add_search_loading:      false,
             add_search_error:        None,
             add_search_input_active: true,
+            confirm_delete_id:       None,
         })
     }
 
@@ -186,11 +190,39 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
+    // Delete
+    // -----------------------------------------------------------------------
+
+    async fn do_delete_manhwa(&mut self, manhwa_id: i64) -> Result<()> {
+        db::delete_manhwa(&self.pool, manhwa_id).await?;
+        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+        // Keep cursor in bounds
+        let max = self.manhwa_list.len().saturating_sub(1);
+        self.library_sel = self.library_sel.min(max);
+        self.confirm_delete_id = None;
+        self.set_msg("Deleted");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Library keys
     // -----------------------------------------------------------------------
 
     async fn handle_library_key(&mut self, key: KeyEvent) -> Result<()> {
         let count = self.visible_manhwa().len();
+
+        // If awaiting delete confirmation, handle only 'd' (confirm) or Esc (cancel)
+        if let Some(id) = self.confirm_delete_id {
+            match key.code {
+                KeyCode::Char('d') => { self.do_delete_manhwa(id).await?; }
+                KeyCode::Esc       => {
+                    self.confirm_delete_id = None;
+                    self.set_msg("Delete cancelled");
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
 
         if self.search_active {
             match key.code {
@@ -214,6 +246,11 @@ impl App {
                 self.add_search_sel = 0;
                 self.add_search_input_active = true;
                 self.screen = Screen::Search;
+            }
+            KeyCode::Char('d') => {
+                if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
+                    self.confirm_delete_id = Some(manhwa.id);
+                }
             }
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
