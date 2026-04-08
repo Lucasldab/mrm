@@ -258,7 +258,7 @@ pub async fn recompute_status(pool: &SqlitePool, manhwa_id: i64) -> Result<Statu
     let unread: i64  = row.try_get("unread")?;
     let pub_st: &str = row.try_get("pub_status")?;
 
-    let status = if read <= 5 {
+    let status = if read < 5 {
         Status::LookedInto
     } else if unread > 0 {
         Status::Reading
