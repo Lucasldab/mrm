@@ -88,10 +88,14 @@ pub struct App {
     // Config
     pub keys: crate::config::KeysConfig,
     pub theme: crate::config::ThemeConfig,
+    pub imv_config: crate::config::ImvConfig,
+
+    // Vim-style gg: true when first g was pressed, waiting for second
+    pub pending_g: bool,
 }
 
 impl App {
-    pub async fn new(pool: SqlitePool, picker: Option<Picker>, keys: crate::config::KeysConfig, theme: crate::config::ThemeConfig) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, picker: Option<Picker>, keys: crate::config::KeysConfig, theme: crate::config::ThemeConfig, imv_config: crate::config::ImvConfig) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
 
         Ok(Self {
@@ -132,6 +136,8 @@ impl App {
             grid_cols:               1,
             keys,
             theme,
+            imv_config,
+            pending_g: false,
         })
     }
 
@@ -238,6 +244,30 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             self.should_quit = true;
+            return Ok(());
+        }
+
+        // Vim-style gg: first g sets pending, second g fires top()
+        if self.pending_g {
+            self.pending_g = false;
+            if key.code == KeyCode::Char('g') {
+                let top_key = KeyEvent::new(self.keys.top(), KeyModifiers::NONE);
+                match self.screen.clone() {
+                    Screen::Library                           => self.handle_library_key(top_key).await?,
+                    Screen::Detail { manhwa_id }              => self.handle_detail_key(top_key, manhwa_id).await?,
+                    _ => {}
+                }
+                return Ok(());
+            }
+            // Not g — fall through and process the actual key normally
+        }
+        if key.code == KeyCode::Char('g')
+            && !key.modifiers.contains(KeyModifiers::SHIFT)
+            && !self.search_active
+            && !self.add_search_input_active
+            && matches!(self.screen, Screen::Library | Screen::Detail { .. })
+        {
+            self.pending_g = true;
             return Ok(());
         }
 
@@ -736,15 +766,9 @@ impl App {
     }
 
     fn launch_imv(&mut self) {
-        // Write a temporary imv config with fit scaling for tall manga pages
+        // Write a temporary imv config from user-configurable [imv] section
         let tmp_config = std::env::temp_dir().join("mrm_imv.conf");
-        let _ = std::fs::write(&tmp_config, "\
-[options]\ninitial_pan = 50 0\nscaling_mode = none\npan_limits = yes\n\
-[binds]\nq = quit\n<Left> = prev; pan 0 0\n<Right> = next; pan 0 0\n\
-j = pan 0 -50\nk = pan 0 50\n<Shift+J> = pan 0 -500\n<Shift+K> = pan 0 500\n\
-h = pan 50 0\nl = pan -50 0\n<Up> = zoom 1\n<Down> = zoom -1\nf = fullscreen\n\
-<scroll-up> = pan 0 50\n<scroll-down> = pan 0 -50\n\
-<shift-scroll-up> = pan 0 500\n<shift-scroll-down> = pan 0 -500\n");
+        let _ = std::fs::write(&tmp_config, self.imv_config.to_config_string());
 
         let mut args = vec!["-c".to_string(), tmp_config.to_string_lossy().into_owned()];
         for path in &self.image_paths {

@@ -77,7 +77,7 @@ mrm --once
 |-----|--------|
 | `j`/`k` | Navigate down/up |
 | `h`/`l` | Navigate left/right |
-| `g`/`G` | Jump to top/bottom |
+| `gg`/`G` | Jump to top/bottom |
 | `Enter` | Open selected |
 | `Esc` | Go back |
 | `/` | Search library |
@@ -102,6 +102,54 @@ accent = "yellow"
 status_reading = "#00ff88"
 highlight_bg = "236"
 ```
+
+## imv Viewer
+
+The image viewer (imv) options and keybinds are customizable under `[imv]` in `config.toml`. Both subsections are optional — anything you don't specify keeps the default.
+
+### Options
+
+```toml
+[imv.options]
+initial_pan = "50 0"      # horizontal center, top of page
+scaling_mode = "none"      # 1:1 pixels (alternatives: "shrink", "full", "crop")
+pan_limits = "yes"         # prevent panning past image edges
+```
+
+### Keybinds
+
+```toml
+[imv.binds]
+q = "quit"
+"<Left>" = "prev; pan 0 0"
+"<Right>" = "next; pan 0 0"
+j = "pan 0 -50"
+k = "pan 0 50"
+"<Shift+J>" = "pan 0 -500"
+"<Shift+K>" = "pan 0 500"
+h = "pan 50 0"
+l = "pan -50 0"
+"<Up>" = "zoom 1"
+"<Down>" = "zoom -1"
+f = "fullscreen"
+"<scroll-up>" = "pan 0 50"
+"<scroll-down>" = "pan 0 -50"
+"<shift-scroll-up>" = "pan 0 500"
+"<shift-scroll-down>" = "pan 0 -500"
+```
+
+To customize, just override the keys you want. For example, to increase pan speed and add a reset-zoom bind:
+
+```toml
+[imv.binds]
+j = "pan 0 -100"
+k = "pan 0 100"
+r = "scaling_mode none"
+```
+
+> **Note:** If you provide `[imv.binds]`, it **replaces** all default binds, so include every bind you want.
+
+See the [imv man page](https://man.sr.ht/~exec64/imv/) for all available options and commands.
 
 ## Disclaimer
 

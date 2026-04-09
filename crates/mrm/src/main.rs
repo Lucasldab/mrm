@@ -278,6 +278,9 @@ async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> 
     let theme_config = config_opt.as_ref()
         .map(|c| c.theme.clone())
         .unwrap_or_default();
+    let imv_config = config_opt.as_ref()
+        .map(|c| c.imv.clone())
+        .unwrap_or_default();
 
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
     let shutdown = CancellationToken::new();
@@ -297,7 +300,7 @@ async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> 
         Some(p)
     };
 
-    let mut app = match App::new(pool, picker, keys_config, theme_config).await {
+    let mut app = match App::new(pool, picker, keys_config, theme_config, imv_config).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };

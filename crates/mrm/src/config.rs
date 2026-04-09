@@ -22,6 +22,8 @@ pub struct Config {
     pub keys:          KeysConfig,
     #[serde(default)]
     pub theme:         ThemeConfig,
+    #[serde(default)]
+    pub imv:           ImvConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +261,76 @@ impl ThemeConfig {
     pub fn success(&self)        -> Color { Self::parse_color(&self.success) }
     pub fn warning(&self)        -> Color { Self::parse_color(&self.warning) }
     pub fn border(&self)         -> Color { Self::parse_color(&self.border) }
+}
+
+// ---------------------------------------------------------------------------
+// imv viewer
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ImvConfig {
+    pub options: ImvOptions,
+    pub binds:   HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ImvOptions {
+    pub initial_pan:   String,
+    pub scaling_mode:  String,
+    pub pan_limits:    String,
+}
+
+impl Default for ImvOptions {
+    fn default() -> Self {
+        Self {
+            initial_pan:  "50 0".into(),
+            scaling_mode: "none".into(),
+            pan_limits:   "yes".into(),
+        }
+    }
+}
+
+impl Default for ImvConfig {
+    fn default() -> Self {
+        let mut binds = HashMap::new();
+        binds.insert("q".into(),                "quit".into());
+        binds.insert("<Left>".into(),           "prev; pan 0 0".into());
+        binds.insert("<Right>".into(),          "next; pan 0 0".into());
+        binds.insert("j".into(),                "pan 0 -50".into());
+        binds.insert("k".into(),                "pan 0 50".into());
+        binds.insert("<Shift+J>".into(),        "pan 0 -500".into());
+        binds.insert("<Shift+K>".into(),        "pan 0 500".into());
+        binds.insert("h".into(),                "pan 50 0".into());
+        binds.insert("l".into(),                "pan -50 0".into());
+        binds.insert("<Up>".into(),             "zoom 1".into());
+        binds.insert("<Down>".into(),           "zoom -1".into());
+        binds.insert("f".into(),                "fullscreen".into());
+        binds.insert("<scroll-up>".into(),      "pan 0 50".into());
+        binds.insert("<scroll-down>".into(),    "pan 0 -50".into());
+        binds.insert("<shift-scroll-up>".into(),   "pan 0 500".into());
+        binds.insert("<shift-scroll-down>".into(), "pan 0 -500".into());
+        Self { options: ImvOptions::default(), binds }
+    }
+}
+
+impl ImvConfig {
+    /// Render to imv config file format.
+    pub fn to_config_string(&self) -> String {
+        let mut s = String::from("[options]\n");
+        s.push_str(&format!("initial_pan = {}\n", self.options.initial_pan));
+        s.push_str(&format!("scaling_mode = {}\n", self.options.scaling_mode));
+        s.push_str(&format!("pan_limits = {}\n", self.options.pan_limits));
+        s.push_str("\n[binds]\n");
+        // Sort keys for deterministic output
+        let mut pairs: Vec<_> = self.binds.iter().collect();
+        pairs.sort_by_key(|(k, _)| (*k).clone());
+        for (key, action) in pairs {
+            s.push_str(&format!("{} = {}\n", key, action));
+        }
+        s
+    }
 }
 
 // ---------------------------------------------------------------------------
