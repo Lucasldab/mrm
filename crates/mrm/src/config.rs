@@ -30,6 +30,9 @@ pub struct Config {
 pub struct SourceConfig {
     pub base_url: String,
     pub enabled:  bool,
+    /// Path to the project root where the Python scraper package lives.
+    /// Required for sources that delegate to Python (e.g. asura).
+    pub scraper_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,17 +280,19 @@ pub struct ImvConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ImvOptions {
-    pub initial_pan:   String,
-    pub scaling_mode:  String,
-    pub pan_limits:    String,
+    pub initial_pan:            String,
+    pub scaling_mode:           String,
+    pub pan_limits:             String,
+    pub suppress_default_binds: String,
 }
 
 impl Default for ImvOptions {
     fn default() -> Self {
         Self {
-            initial_pan:  "50 0".into(),
-            scaling_mode: "none".into(),
-            pan_limits:   "yes".into(),
+            initial_pan:            "50 0".into(),
+            scaling_mode:           "none".into(),
+            pan_limits:             "yes".into(),
+            suppress_default_binds: "true".into(),
         }
     }
 }
@@ -322,6 +327,7 @@ impl ImvConfig {
         s.push_str(&format!("initial_pan = {}\n", self.options.initial_pan));
         s.push_str(&format!("scaling_mode = {}\n", self.options.scaling_mode));
         s.push_str(&format!("pan_limits = {}\n", self.options.pan_limits));
+        s.push_str(&format!("suppress_default_binds = {}\n", self.options.suppress_default_binds));
         s.push_str("\n[binds]\n");
         // Sort keys for deterministic output
         let mut pairs: Vec<_> = self.binds.iter().collect();

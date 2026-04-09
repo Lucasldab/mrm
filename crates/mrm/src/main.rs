@@ -258,7 +258,10 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
         match name.as_str() {
             "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
             "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
-            "asura"    => { registry.insert("asura",    Box::new(AsuraScraper::new())); }
+            "asura"    => {
+                let dir = source_cfg.scraper_dir.as_deref().unwrap_or(".").into();
+                registry.insert("asura", Box::new(AsuraScraper::new(dir)));
+            }
             _ => {}
         }
     }
@@ -273,19 +276,10 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
 async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> Result<()> {
     startup_cleanup_tmp();
 
-    let keys_config = config_opt.as_ref()
-        .map(|c| c.keys.clone())
-        .unwrap_or_default();
-    let theme_config = config_opt.as_ref()
-        .map(|c| c.theme.clone())
-        .unwrap_or_default();
-    let imv_config = config_opt.as_ref()
-        .map(|c| c.imv.clone())
-        .unwrap_or_default();
-
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
     let shutdown = CancellationToken::new();
 
+    let config_for_app = config_opt.clone().expect("config.toml required");
     let coordinator_handle = config_opt.map(|cfg| {
         let pool_c     = pool.clone();
         let shutdown_c = shutdown.clone();
@@ -301,7 +295,7 @@ async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> 
         Some(p)
     };
 
-    let mut app = match App::new(pool, picker, keys_config, theme_config, imv_config).await {
+    let mut app = match App::new(pool, picker, config_for_app).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };

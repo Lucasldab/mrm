@@ -86,6 +86,7 @@ pub struct App {
     pub grid_cols: usize,
 
     // Config
+    pub config: crate::config::Config,
     pub keys: crate::config::KeysConfig,
     pub theme: crate::config::ThemeConfig,
     pub imv_config: crate::config::ImvConfig,
@@ -95,7 +96,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(pool: SqlitePool, picker: Option<Picker>, keys: crate::config::KeysConfig, theme: crate::config::ThemeConfig, imv_config: crate::config::ImvConfig) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, picker: Option<Picker>, config: crate::config::Config) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
 
         Ok(Self {
@@ -134,9 +135,10 @@ impl App {
             cover_protocols:         HashMap::new(),
             cover_tick:              0,
             grid_cols:               1,
-            keys,
-            theme,
-            imv_config,
+            keys:                    config.keys.clone(),
+            theme:                   config.theme.clone(),
+            imv_config:              config.imv.clone(),
+            config,
             pending_g: false,
         })
     }
@@ -530,7 +532,7 @@ impl App {
 
         let mdx   = MangaDexScraper::new();
         let mck   = MangackScraper::new();
-        let asura = AsuraScraper::new();
+        let asura = AsuraScraper::new(self.config.sources.get("asura").and_then(|s| s.scraper_dir.as_deref()).unwrap_or(".").into());
 
         // Run all searches concurrently; surface errors as status, not crash
         let (mdx_res, mck_res, asura_res) = tokio::join!(
@@ -580,7 +582,7 @@ impl App {
         let scraper: Box<dyn Scraper> = match result.source.as_str() {
             "mangadex" => Box::new(MangaDexScraper::new()),
             "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new()),
+            "asura"    => Box::new(AsuraScraper::new(self.config.sources.get("asura").and_then(|s| s.scraper_dir.as_deref()).unwrap_or(".").into())),
             other      => {
                 self.add_search_error = Some(format!("Unknown source: {other}"));
                 self.add_search_loading = false;
@@ -666,8 +668,11 @@ impl App {
                 .unwrap_or_else(std::env::temp_dir);
             self.session_dir = session_dir;
 
+            let asura_dir: std::path::PathBuf = self.config.sources.get("asura")
+                .and_then(|s| s.scraper_dir.as_deref())
+                .unwrap_or(".").into();
             tokio::spawn(async move {
-                fetch_chapter_images(&source, &url, session_path, tx, err_tx).await;
+                fetch_chapter_images(&source, &url, session_path, tx, err_tx, asura_dir).await;
             });
         }
         Ok(())
@@ -865,6 +870,7 @@ async fn fetch_chapter_images(
     session_dir: std::path::PathBuf,
     tx: mpsc::Sender<Option<(usize, std::path::PathBuf)>>,
     err_tx: mpsc::Sender<String>,
+    asura_scraper_dir: std::path::PathBuf,
 ) {
     use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
     use std::sync::Arc;
@@ -875,7 +881,7 @@ async fn fetch_chapter_images(
     let scraper: Box<dyn Scraper> = match source {
         "mangadex" => Box::new(MangaDexScraper::new()),
         "mangack"  => Box::new(MangackScraper::new()),
-        "asura"    => Box::new(AsuraScraper::new()),
+        "asura"    => Box::new(AsuraScraper::new(asura_scraper_dir)),
         other => {
             let _ = err_tx.send(format!("Unknown source: {other}")).await;
             let _ = tx.send(None).await;

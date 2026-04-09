@@ -2,11 +2,12 @@
 //!
 //! AsuraScans uses Cloudflare, which blocks standard HTTP clients.
 //! The Python side uses curl_cffi to bypass TLS fingerprinting.
-//! This module shells out to `python -m scraper.asura_bridge <command> <args>`
-//! and parses the JSON output.
+//! This module shells out to the venv python in `scraper_dir` and runs
+//! `python -m scraper.asura_bridge <command> <args>`, parsing JSON output.
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::{ChapterData, Scraper, SearchResult, SeriesData};
@@ -15,19 +16,29 @@ use super::{ChapterData, Scraper, SearchResult, SeriesData};
 // Struct
 // ---------------------------------------------------------------------------
 
-pub struct AsuraScraper;
+pub struct AsuraScraper {
+    /// Path to the project root containing the `scraper/` Python package.
+    scraper_dir: PathBuf,
+}
 
 impl AsuraScraper {
-    pub fn new() -> Self {
-        Self
+    pub fn new(scraper_dir: PathBuf) -> Self {
+        Self { scraper_dir }
+    }
+
+    /// Resolve the venv Python binary path.
+    fn python_path(&self) -> PathBuf {
+        self.scraper_dir.join("scraper/.venv/bin/python3")
     }
 
     /// Run the Python bridge script and return its stdout as a string.
     async fn run_bridge(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = tokio::process::Command::new("python3");
+        let python = self.python_path();
+        let mut cmd = tokio::process::Command::new(&python);
         cmd.arg("-m")
             .arg("scraper.asura_bridge")
             .args(args)
+            .current_dir(&self.scraper_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
