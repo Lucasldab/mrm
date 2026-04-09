@@ -6,6 +6,10 @@ enabled = true
 base_url = "https://mangack.com"
 enabled = true
 
+[sources.asura]
+base_url = "https://asurascans.com"
+enabled = true
+
 [notifications]
 enabled = true
 poll_interval_minutes = 30

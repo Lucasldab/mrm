@@ -106,6 +106,9 @@ pub use mangadex::MangaDexScraper;
 pub mod mangack;    // Phase 3 Plan 01
 pub use mangack::MangackScraper;
 
+pub mod asura;
+pub use asura::AsuraScraper;
+
 pub mod coordinator;  // Phase 5 Plan 02
 pub use coordinator::{coordinator_task, ScraperEvent};
 

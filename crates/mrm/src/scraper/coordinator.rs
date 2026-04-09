@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::db;
 use crate::notifier;
-use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -81,6 +81,7 @@ fn build_registry(config: &Config) -> HashMap<&'static str, Box<dyn Scraper>> {
         match name.as_str() {
             "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
             "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
+            "asura"    => { registry.insert("asura",    Box::new(AsuraScraper::new())); }
             other => {
                 eprintln!("mrm: unknown source '{other}' in config, skipping");
             }

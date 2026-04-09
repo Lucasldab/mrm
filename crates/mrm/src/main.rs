@@ -250,7 +250,7 @@ async fn run_once(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> 
 }
 
 fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> {
-    use scraper::{MangaDexScraper, MangackScraper};
+    use scraper::{AsuraScraper, MangaDexScraper, MangackScraper};
     let mut registry: std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> = std::collections::HashMap::new();
 
     for (name, source_cfg) in &config.sources {
@@ -258,6 +258,7 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
         match name.as_str() {
             "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
             "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
+            "asura"    => { registry.insert("asura",    Box::new(AsuraScraper::new())); }
             _ => {}
         }
     }

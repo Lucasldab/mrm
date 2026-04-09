@@ -517,7 +517,7 @@ impl App {
     /// Fan out search() to both scrapers concurrently, merge results.
     /// Updates add_search_results and clears add_search_loading on completion.
     pub async fn search_all_scrapers(&mut self) -> Result<()> {
-        use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
         let query = self.add_search_query.clone();
         if query.trim().is_empty() {
             self.add_search_results.clear();
@@ -530,24 +530,31 @@ impl App {
 
         let mdx   = MangaDexScraper::new();
         let mck   = MangackScraper::new();
+        let asura = AsuraScraper::new();
 
-        // Run both searches concurrently; surface errors as status, not crash
-        let (mdx_res, mck_res) = tokio::join!(
+        // Run all searches concurrently; surface errors as status, not crash
+        let (mdx_res, mck_res, asura_res) = tokio::join!(
             mdx.search(&query),
             mck.search(&query),
+            asura.search(&query),
         );
 
         let mut merged = Vec::new();
+        let mut errors = Vec::new();
         match mdx_res {
             Ok(r)  => merged.extend(r),
-            Err(e) => self.add_search_error = Some(format!("MangaDex: {e}")),
+            Err(e) => errors.push(format!("MangaDex: {e}")),
         }
         match mck_res {
             Ok(r)  => merged.extend(r),
-            Err(e) => {
-                let existing = self.add_search_error.take().unwrap_or_default();
-                self.add_search_error = Some(format!("{existing}  MangaCK: {e}").trim().to_string());
-            }
+            Err(e) => errors.push(format!("MangaCK: {e}")),
+        }
+        match asura_res {
+            Ok(r)  => merged.extend(r),
+            Err(e) => errors.push(format!("Asura: {e}")),
+        }
+        if !errors.is_empty() {
+            self.add_search_error = Some(errors.join("  "));
         }
 
         self.add_search_results = merged;
@@ -559,7 +566,7 @@ impl App {
 
     /// Fetch full series data for the selected search result and insert into DB.
     pub async fn do_add_manhwa(&mut self) -> Result<()> {
-        use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
         use crate::db;
 
         let result = match self.add_search_results.get(self.add_search_sel) {
@@ -573,6 +580,7 @@ impl App {
         let scraper: Box<dyn Scraper> = match result.source.as_str() {
             "mangadex" => Box::new(MangaDexScraper::new()),
             "mangack"  => Box::new(MangackScraper::new()),
+            "asura"    => Box::new(AsuraScraper::new()),
             other      => {
                 self.add_search_error = Some(format!("Unknown source: {other}"));
                 self.add_search_loading = false;
@@ -766,15 +774,19 @@ impl App {
     }
 
     fn launch_imv(&mut self) {
-        // Write a temporary imv config from user-configurable [imv] section
-        let tmp_config = std::env::temp_dir().join("mrm_imv.conf");
-        let _ = std::fs::write(&tmp_config, self.imv_config.to_config_string());
+        // Write a temporary imv config to a fake XDG_CONFIG_HOME so imv picks
+        // it up instead of the user's global config.
+        let tmp_xdg = std::env::temp_dir().join("mrm_imv_xdg");
+        let tmp_imv_dir = tmp_xdg.join("imv");
+        let _ = std::fs::create_dir_all(&tmp_imv_dir);
+        let _ = std::fs::write(tmp_imv_dir.join("config"), self.imv_config.to_config_string());
 
-        let mut args = vec!["-c".to_string(), tmp_config.to_string_lossy().into_owned()];
+        let mut args: Vec<String> = Vec::new();
         for path in &self.image_paths {
             args.push(path.to_string_lossy().into_owned());
         }
         match std::process::Command::new("imv")
+            .env("XDG_CONFIG_HOME", &tmp_xdg)
             .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -854,7 +866,7 @@ async fn fetch_chapter_images(
     tx: mpsc::Sender<Option<(usize, std::path::PathBuf)>>,
     err_tx: mpsc::Sender<String>,
 ) {
-    use crate::scraper::{MangaDexScraper, MangackScraper, Scraper};
+    use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
@@ -863,6 +875,7 @@ async fn fetch_chapter_images(
     let scraper: Box<dyn Scraper> = match source {
         "mangadex" => Box::new(MangaDexScraper::new()),
         "mangack"  => Box::new(MangackScraper::new()),
+        "asura"    => Box::new(AsuraScraper::new()),
         other => {
             let _ = err_tx.send(format!("Unknown source: {other}")).await;
             let _ = tx.send(None).await;

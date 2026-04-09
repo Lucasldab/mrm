@@ -30,6 +30,7 @@ from .db import (
 )
 from .scrapers.mangadex import MangaDexScraper
 from .scrapers.mangack import MangackScraper
+from .scrapers.asura import AsuraScraper
 from .scrapers.base import ScraperError
 
 logging.basicConfig(
@@ -43,6 +44,7 @@ log = logging.getLogger("mrm.daemon")
 SCRAPERS = {
     "mangadex": MangaDexScraper,
     "mangack":  MangackScraper,
+    "asura":    AsuraScraper,
 }
 
 
