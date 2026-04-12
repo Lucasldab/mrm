@@ -26,7 +26,7 @@ Confirmed structure from live site inspection:
 import asyncio
 import html
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from curl_cffi import requests as cffi_requests
@@ -45,6 +45,37 @@ _STATUS_MAP = {
 _NAV_LABELS = {"first chapter", "latest chapter", "first", "latest"}
 
 _DATE_FORMATS = ["%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"]
+
+
+_CHAPTER_META_RE = re.compile(
+    r'number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^}]*?'
+    r'is_premium&quot;:\[0,(?P<prem>true|false)\][^}]*?'
+    r'early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\]'
+)
+
+
+def _parse_locked_chapters(raw_html: str) -> set[float]:
+    """Return set of chapter numbers still behind the early-access paywall.
+
+    AsuraScans marks fresh chapters with is_premium=true and an
+    early_access_until timestamp; once that timestamp passes the chapter
+    becomes free to read. We skip chapters still in the early-access window.
+    """
+    locked: set[float] = set()
+    now = datetime.now(timezone.utc)
+    for m in _CHAPTER_META_RE.finditer(raw_html):
+        if m.group("prem") != "true":
+            continue
+        eau = m.group("eau")
+        if not eau:
+            continue
+        try:
+            ts = datetime.fromisoformat(eau.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts > now:
+            locked.add(float(m.group("num")))
+    return locked
 
 
 def _parse_date(raw: str) -> Optional[str]:
@@ -181,7 +212,9 @@ class AsuraScraper(BaseScraper):
                 break
 
         # Chapters
+        locked = _parse_locked_chapters(resp.text)
         chapters = self._parse_chapter_links(tree)
+        chapters = [c for c in chapters if c["number"] not in locked]
         chapters.sort(key=lambda c: c["number"])
 
         return {
