@@ -13,12 +13,27 @@ use crate::types::{AppEvent, Chapter, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
 // ---------------------------------------------------------------------------
-// ManagedChild — kills imv on drop (prevents orphan processes)
+// ManagedChild — kills child viewer on drop (prevents orphan processes)
 // ---------------------------------------------------------------------------
 
 /// Wrapper around std::process::Child that kills the process on drop.
-/// Prevents imv from becoming an orphan when the TUI exits or panics.
+/// Prevents the viewer from becoming an orphan when the TUI exits or panics.
 pub(crate) struct ManagedChild(std::process::Child);
+
+/// Check if a binary exists on PATH (or is an absolute/relative path that resolves).
+fn binary_exists(bin: &str) -> bool {
+    if bin.contains('/') {
+        return std::path::Path::new(bin).is_file();
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            if std::path::Path::new(dir).join(bin).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 impl Drop for ManagedChild {
     fn drop(&mut self) {
@@ -55,11 +70,14 @@ pub struct App {
     pub current_chapter: Option<Chapter>,
     pub images_loading:  bool,
     pub image_paths:     Vec<std::path::PathBuf>,
-    pub image_rx:        Option<mpsc::Receiver<Option<(usize, std::path::PathBuf)>>>,
-    pub image_pending:   Vec<(usize, std::path::PathBuf)>,
-    pub imv_process:     Option<ManagedChild>,
-    pub imv_pid:         Option<u32>,
-    pub imv_loaded_count: usize,
+    pub image_rx:            Option<mpsc::Receiver<Option<(usize, Option<std::path::PathBuf>)>>>,
+    pub image_pending:       Vec<(usize, Option<std::path::PathBuf>)>,
+    pub next_expected_image: usize,
+    pub viewer_process:      Option<ManagedChild>,
+    pub viewer_pid:          Option<u32>,
+    pub viewer_socket:       Option<String>,
+    pub viewer_loaded_count: usize,
+    pub viewer_drop_warned:  bool,
     pub session_dir:     Option<TempDir>,
     pub error_rx:        Option<mpsc::Receiver<String>>,
 
@@ -90,6 +108,8 @@ pub struct App {
     pub keys: crate::config::KeysConfig,
     pub theme: crate::config::ThemeConfig,
     pub imv_config: crate::config::ImvConfig,
+    pub rv_config: crate::config::RvConfig,
+    pub viewer_kind: crate::config::ViewerKind,
 
     // Vim-style gg: true when first g was pressed, waiting for second
     pub pending_g: bool,
@@ -114,12 +134,15 @@ impl App {
             status_sel:       0,
             current_chapter:  None,
             images_loading:   false,
-            image_paths:      Vec::new(),
-            image_rx:         None,
-            image_pending:    Vec::new(),
-            imv_process:      None,
-            imv_pid:          None,
-            imv_loaded_count: 0,
+            image_paths:         Vec::new(),
+            image_rx:            None,
+            image_pending:       Vec::new(),
+            next_expected_image: 0,
+            viewer_process:      None,
+            viewer_pid:          None,
+            viewer_socket:       None,
+            viewer_loaded_count: 0,
+            viewer_drop_warned:  false,
             session_dir:      None,
             error_rx:         None,
             status_msg:       None,
@@ -138,6 +161,8 @@ impl App {
             keys:                    config.keys.clone(),
             theme:                   config.theme.clone(),
             imv_config:              config.imv.clone(),
+            rv_config:               config.rv.clone(),
+            viewer_kind:             config.viewer_kind(),
             config,
             pending_g: false,
         })
@@ -438,15 +463,15 @@ impl App {
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         let k = key.code;
         if k == KeyCode::Esc || k == self.keys.back() {
-            self.kill_imv();
+            self.kill_viewer();
             self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_detail(manhwa_id).await?;
         } else if k == self.keys.next_chapter() {
-            self.kill_imv();
+            self.kill_viewer();
             self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_next_chapter(manhwa_id, chapter_id).await?;
         } else if k == self.keys.prev_chapter() {
-            self.kill_imv();
+            self.kill_viewer();
             self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
@@ -641,19 +666,22 @@ impl App {
     pub async fn open_reader(&mut self, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         db::start_chapter(&self.pool, chapter_id).await?;
         self.current_chapter  = self.chapter_list.iter().find(|c| c.id == chapter_id).cloned();
-        self.image_paths      = Vec::new();
-        self.image_pending    = Vec::new();
-        self.images_loading   = true;
-        self.imv_process      = None;
-        self.imv_pid          = None;
-        self.imv_loaded_count = 0;
+        self.image_paths          = Vec::new();
+        self.image_pending        = Vec::new();
+        self.next_expected_image  = 0;
+        self.images_loading       = true;
+        self.viewer_process       = None;
+        self.viewer_pid           = None;
+        self.viewer_socket        = None;
+        self.viewer_loaded_count  = 0;
+        self.viewer_drop_warned   = false;
         self.screen           = Screen::Reader { manhwa_id, chapter_id };
 
         if let Some(ch) = &self.current_chapter {
             let source = self.current_manhwa.as_ref()
                 .map(|m| m.source.clone()).unwrap_or_default();
             let url = ch.url.clone();
-            let (tx, rx) = mpsc::channel::<Option<(usize, std::path::PathBuf)>>(32);
+            let (tx, rx) = mpsc::channel::<Option<(usize, Option<std::path::PathBuf>)>>(32);
             let (err_tx, err_rx) = mpsc::channel::<String>(4);
             self.image_rx  = Some(rx);
             self.error_rx  = Some(err_rx);
@@ -710,14 +738,15 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn poll_images(&mut self) {
-        // If imv was closed by the user, stop loading
-        if let Some(managed) = &mut self.imv_process {
+        // If viewer was closed by the user, stop loading
+        if let Some(managed) = &mut self.viewer_process {
             if let Ok(Some(_)) = managed.0.try_wait() {
-                self.imv_process    = None;
-                self.imv_pid        = None;
-                self.images_loading = false;
-                self.image_rx       = None;
-                self.error_rx       = None;
+                self.viewer_process  = None;
+                self.viewer_pid      = None;
+                self.viewer_socket   = None;
+                self.images_loading  = false;
+                self.image_rx        = None;
+                self.error_rx        = None;
                 return;
             }
         }
@@ -745,30 +774,29 @@ impl App {
             }
         }
 
-        // Sort pending and flush in-order images to image_paths
+        // Sort pending and flush in-order. Failed pages (None) advance
+        // next_expected_image without being pushed, so later pages aren't blocked.
         self.image_pending.sort_by_key(|(i, _)| *i);
-        let expected = self.image_paths.len();
-        while self.image_pending.first().map(|(i, _)| *i) == Some(expected) {
-            let (_, path) = self.image_pending.remove(0);
-            self.image_paths.push(path);
+        while self.image_pending.first().map(|(i, _)| *i) == Some(self.next_expected_image) {
+            let (_, maybe_path) = self.image_pending.remove(0);
+            self.next_expected_image += 1;
+            if let Some(path) = maybe_path {
+                self.image_paths.push(path);
+            }
         }
 
-        let had_imv = self.imv_process.is_some();
+        let had_viewer = self.viewer_process.is_some();
 
-        if !had_imv && !self.image_paths.is_empty() {
-            self.launch_imv();
-        } else if had_imv {
-            // Feed new images to running imv via imv-msg
+        if !had_viewer && !self.image_paths.is_empty() {
+            self.launch_viewer();
+        } else if had_viewer {
+            // Feed new images to running viewer
             let total = self.image_paths.len();
-            if let Some(pid) = self.imv_pid {
-                for i in self.imv_loaded_count..total {
-                    let p = self.image_paths[i].to_string_lossy().into_owned();
-                    let _ = std::process::Command::new("imv-msg")
-                        .args([&pid.to_string(), "open", &p])
-                        .status();
-                }
+            for i in self.viewer_loaded_count..total {
+                let p = self.image_paths[i].to_string_lossy().into_owned();
+                self.send_viewer_open(&p);
             }
-            self.imv_loaded_count = total;
+            self.viewer_loaded_count = total;
         }
 
         if done {
@@ -778,10 +806,19 @@ impl App {
         }
     }
 
+    fn launch_viewer(&mut self) {
+        use crate::config::ViewerKind;
+        match self.viewer_kind {
+            ViewerKind::Imv => self.launch_imv(),
+            ViewerKind::Rv  => self.launch_rv(),
+        }
+    }
+
     fn launch_imv(&mut self) {
         // Write a temporary imv config to a fake XDG_CONFIG_HOME so imv picks
         // it up instead of the user's global config.
-        let tmp_xdg = std::env::temp_dir().join("mrm_imv_xdg");
+        // PID-scoped path so concurrent mrm instances don't stomp on each other's config.
+        let tmp_xdg = std::env::temp_dir().join(format!("mrm_imv_xdg_{}", std::process::id()));
         let tmp_imv_dir = tmp_xdg.join("imv");
         let _ = std::fs::create_dir_all(&tmp_imv_dir);
         let _ = std::fs::write(tmp_imv_dir.join("config"), self.imv_config.to_config_string());
@@ -790,28 +827,113 @@ impl App {
         for path in &self.image_paths {
             args.push(path.to_string_lossy().into_owned());
         }
-        match std::process::Command::new("imv")
+        let bin = &self.imv_config.binary;
+        if !binary_exists(bin) {
+            self.set_msg(format!("{bin} not found in PATH"));
+            return;
+        }
+        let log = std::fs::File::create("/tmp/mrm-imv.log").ok();
+        let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
+        match std::process::Command::new(bin)
             .env("XDG_CONFIG_HOME", &tmp_xdg)
             .args(&args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(stderr)
             .spawn()
         {
             Ok(child) => {
                 let pid = child.id();
-                self.imv_pid          = Some(pid);
-                self.imv_loaded_count = self.image_paths.len();
-                self.imv_process      = Some(ManagedChild(child));
+                self.viewer_pid          = Some(pid);
+                self.viewer_loaded_count = self.image_paths.len();
+                self.viewer_process      = Some(ManagedChild(child));
             }
-            Err(e) => self.set_msg(format!("imv error: {e}")),
+            Err(e) => self.set_msg(format!("{bin} error: {e}")),
         }
     }
 
-    fn kill_imv(&mut self) {
-        self.imv_process      = None;  // Drop kills imv
-        self.session_dir      = None;  // Drop + TempDir deletes /tmp/mrm_*/
-        self.imv_pid          = None;
-        self.imv_loaded_count = 0;
+    fn launch_rv(&mut self) {
+        let mut args = self.rv_config.to_args();
+        for path in &self.image_paths {
+            args.push(path.to_string_lossy().into_owned());
+        }
+        let bin = self.rv_config.binary.clone();
+        if !binary_exists(&bin) {
+            self.set_msg(format!("{bin} not found in PATH"));
+            return;
+        }
+        let log = std::fs::File::create("/tmp/mrm-rv.log").ok();
+        let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
+        match std::process::Command::new(&bin)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+        {
+            Ok(mut child) => {
+                // rv prints the socket path to stdout on startup.
+                // Read with timeout on a worker thread so a silent rv can't hang the TUI.
+                let stdout = child.stdout.take();
+                let socket_path = stdout.and_then(|s| {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        let mut reader = std::io::BufReader::new(s);
+                        let mut line = String::new();
+                        let _ = reader.read_line(&mut line);
+                        let _ = tx.send(line.trim().to_string());
+                    });
+                    rx.recv_timeout(std::time::Duration::from_secs(3))
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
+                if socket_path.is_none() {
+                    self.set_msg(format!("{bin}: no socket path (see /tmp/mrm-rv.log)"));
+                }
+                let pid = child.id();
+                self.viewer_pid          = Some(pid);
+                self.viewer_socket       = socket_path;
+                self.viewer_loaded_count = self.image_paths.len();
+                self.viewer_process      = Some(ManagedChild(child));
+            }
+            Err(e) => self.set_msg(format!("{bin} error: {e}")),
+        }
+    }
+
+    fn send_viewer_open(&mut self, path: &str) {
+        use crate::config::ViewerKind;
+        match self.viewer_kind {
+            ViewerKind::Imv => {
+                if let Some(pid) = self.viewer_pid {
+                    let _ = std::process::Command::new("imv-msg")
+                        .args([&pid.to_string(), "open", path])
+                        .status();
+                }
+            }
+            ViewerKind::Rv => {
+                if let Some(sock) = &self.viewer_socket {
+                    let status = std::process::Command::new("rv-msg")
+                        .args([sock, "open", path])
+                        .status();
+                    let failed = !matches!(status, Ok(s) if s.success());
+                    if failed && !self.viewer_drop_warned {
+                        self.viewer_drop_warned = true;
+                        self.set_msg("rv-msg failed; later pages not streamed");
+                    }
+                } else if !self.viewer_drop_warned {
+                    self.viewer_drop_warned = true;
+                    self.set_msg("rv socket unknown; later pages not streamed");
+                }
+            }
+        }
+    }
+
+    fn kill_viewer(&mut self) {
+        self.viewer_process      = None;  // Drop kills viewer
+        self.session_dir         = None;  // Drop + TempDir deletes /tmp/mrm_*/
+        self.viewer_pid          = None;
+        self.viewer_socket       = None;
+        self.viewer_loaded_count = 0;
+        self.viewer_drop_warned  = false;
         self.update_read_progress_sync();
     }
 
@@ -821,7 +943,7 @@ impl App {
 
     fn update_read_progress_sync(&mut self) {
         // Mark as read if we had images (fire-and-forget via tokio)
-        // Called from sync context (kill_imv), so we note it for next async tick.
+        // Called from sync context (kill_viewer), so we note it for next async tick.
         // Progress is updated properly via update_read_progress in async context.
     }
 
@@ -868,7 +990,7 @@ async fn fetch_chapter_images(
     source: &str,
     chapter_url: &str,
     session_dir: std::path::PathBuf,
-    tx: mpsc::Sender<Option<(usize, std::path::PathBuf)>>,
+    tx: mpsc::Sender<Option<(usize, Option<std::path::PathBuf>)>>,
     err_tx: mpsc::Sender<String>,
     asura_scraper_dir: std::path::PathBuf,
 ) {
@@ -906,45 +1028,71 @@ async fn fetch_chapter_images(
         return;
     }
 
-    let client = Arc::new(
-        reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("reqwest client"),
-    );
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30));
+
+    // AsuraScans' CDN rejects non-browser requests and hotlinked fetches.
+    // Send a realistic Chrome UA plus a Referer so the CDN treats us like
+    // an in-page image request.
+    let referer: Option<&'static str> = if source == "asura" {
+        client_builder = client_builder.user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        );
+        Some("https://asurascans.com/")
+    } else {
+        client_builder = client_builder
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
+        None
+    };
+
+    let client = Arc::new(client_builder.build().expect("reqwest client"));
     let sem = Arc::new(Semaphore::new(4));
 
-    let mut set: JoinSet<Option<(usize, std::path::PathBuf)>> = JoinSet::new();
+    // Each task returns (index, Option<PathBuf>) — None = this index failed.
+    // Reporting the index on failure lets poll_images skip it instead of stalling.
+    let mut set: JoinSet<(usize, Option<std::path::PathBuf>)> = JoinSet::new();
 
     for (page, url) in urls.into_iter().enumerate() {
         let client      = client.clone();
         let sem         = sem.clone();
         let session_dir = session_dir.clone();
         set.spawn(async move {
-            let _permit = sem.acquire_owned().await.ok()?;
-            let bytes = client.get(&url).send().await.ok()?.bytes().await.ok()?;
-            let img   = image::load_from_memory(&bytes).ok()?;
-            let path  = session_dir.join(format!("page_{page}.png"));
-            img.save(&path).ok()?;
-            Some((page, path))
+            let result = async {
+                let _permit = sem.acquire_owned().await.ok()?;
+                let mut req = client.get(&url);
+                if let Some(r) = referer {
+                    req = req.header(reqwest::header::REFERER, r);
+                }
+                let bytes = req.send().await.ok()?.bytes().await.ok()?;
+                let img   = image::load_from_memory(&bytes).ok()?;
+                let path  = session_dir.join(format!("page_{page}.png"));
+                img.save(&path).ok()?;
+                Some(path)
+            }.await;
+            (page, result)
         });
     }
 
     // Collect results as they complete (streaming, not batch)
     let mut failures = 0usize;
-    while let Some(result) = set.join_next().await {
-        match result {
-            Ok(Some((page, path))) => {
-                let _ = tx.send(Some((page, path))).await;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((page, Some(path))) => {
+                let _ = tx.send(Some((page, Some(path)))).await;
             }
-            _ => { failures += 1; }
+            Ok((page, None)) => {
+                failures += 1;
+                // Report failed index so poll_images can advance past it
+                let _ = tx.send(Some((page, None))).await;
+            }
+            Err(_) => { failures += 1; }
         }
     }
 
-    if failures > total / 2 {
+    if failures > 0 {
         let _ = err_tx.send(
-            format!("Chapter load degraded: {failures}/{total} pages failed")
+            format!("{failures}/{total} pages failed to load")
         ).await;
     }
 
