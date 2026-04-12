@@ -16,6 +16,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 
 - [MangaDex](https://mangadex.org) (REST API)
 - [MangaCK](https://mangack.com) (HTML scraping)
+- [AsuraScans](https://asurascans.com) (Python scraper; skips early-access/paywalled chapters until they unlock)
 
 ## Requirements
 
@@ -24,6 +25,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
 - [imv](https://sr.ht/~exec64/imv/) — image viewer
 - notify-send (optional, for desktop notifications)
+- Python 3.11+ with `scraper/requirements.txt` installed in `scraper/.venv` (only if AsuraScans source is enabled)
 
 ## Installation
 
@@ -47,6 +49,11 @@ enabled = true
 [sources.mangack]
 base_url = "https://mangack.com"
 enabled = true
+
+[sources.asura]
+base_url = "https://asurascans.com"
+enabled = true
+scraper_dir = "/path/to/mrm"  # repo root; Python scraper lives in ./scraper
 
 [notifications]
 enabled = true
