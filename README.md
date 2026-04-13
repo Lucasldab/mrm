@@ -5,7 +5,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 ## Features
 
 - **TUI library** with grid/list views and cover image thumbnails
-- **Chapter reader** via external image viewer (imv)
+- **Chapter reader** via external image viewer — supports [imv](https://sr.ht/~exec64/imv/) or [rv](https://github.com/Lucasldab/readingViewer), selectable in `config.toml`
 - **Auto-status tracking** — status updates automatically based on your reading progress
 - **Background polling** — checks sources for new chapters on a configurable interval
 - **Desktop notifications** via notify-send (mako)
@@ -23,7 +23,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 - Rust 1.70+
 - SQLite3
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
-- [imv](https://sr.ht/~exec64/imv/) — image viewer
+- An image viewer — either [imv](https://sr.ht/~exec64/imv/) or [rv](https://github.com/Lucasldab/readingViewer) (with `rv-msg`) on `PATH`
 - notify-send (optional, for desktop notifications)
 - Python 3.11+ with `scraper/requirements.txt` installed in `scraper/.venv` (only if AsuraScans source is enabled)
 
@@ -42,6 +42,9 @@ The binary will be at `target/release/mrm`.
 Create `~/.config/mrm/config.toml`:
 
 ```toml
+# Chapter reader: "imv" (default) or "rv"
+viewer = "rv"
+
 [sources.mangadex]
 base_url = "https://api.mangadex.org"
 enabled = true
@@ -157,6 +160,45 @@ r = "scaling_mode none"
 > **Note:** If you provide `[imv.binds]`, it **replaces** all default binds, so include every bind you want.
 
 See the [imv man page](https://man.sr.ht/~exec64/imv/) for all available options and commands.
+
+## rv Viewer
+
+[`rv`](https://github.com/Lucasldab/readingViewer) is an alternative reader that streams pages into a vertical continuous-scroll view, which suits webtoon-style content better than imv's paged mode. Select it by setting `viewer = "rv"` at the top of `config.toml`. When a chapter opens, mrm launches `rv`, reads the socket path it prints on stdout, and pushes new pages to it via `rv-msg` as they finish downloading — so you can start reading before the whole chapter is ready.
+
+### Options
+
+```toml
+[rv]
+scroll_speed      = 80    # pixels per scroll tick
+fast_scroll_speed = 600   # pixels per fast-scroll tick
+fullscreen        = false
+```
+
+### Keybinds
+
+Defaults roughly follow vim motion:
+
+```toml
+[rv.binds]
+q       = "quit"
+j       = "scroll_down"
+k       = "scroll_up"
+J       = "fast_scroll_down"
+K       = "fast_scroll_up"
+space   = "page_down"
+g       = "top"
+G       = "bottom"
+up      = "zoom_in"
+down    = "zoom_out"
+equals  = "zoom_reset"
+f       = "fullscreen"
+h       = "pan_left"
+l       = "pan_right"
+```
+
+As with imv, providing `[rv.binds]` **replaces** the default set, so include every bind you want.
+
+Requires the `rv` and `rv-msg` binaries to be on your `PATH`.
 
 ## Disclaimer
 
