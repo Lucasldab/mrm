@@ -1,3 +1,5 @@
+viewer = "rv"
+
 [sources.mangadex]
 base_url = "https://api.mangadex.org"
 enabled = true
@@ -17,3 +19,13 @@ poll_interval_minutes = 30
 
 [db]
 path = "mrm.db"
+
+[rv]
+scroll_speed = 80
+fast_scroll_speed = 600
+fullscreen = false
+
+[rv.binds]
+e = "scroll_down"
+u = "scroll_up"
+q = "quit"

@@ -60,14 +60,18 @@ fn draw_reader(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, rows[1]);
     let n = app.image_paths.len();
-    let (msg, color) = if app.imv_process.is_some() {
+    let viewer_name = match app.viewer_kind {
+        crate::config::ViewerKind::Imv => "imv",
+        crate::config::ViewerKind::Rv  => "rv",
+    };
+    let (msg, color) = if app.viewer_process.is_some() {
         let extra = if app.images_loading {
             format!(" ({n} loaded, more coming...)")
         } else {
             format!(" ({n} pages)")
         };
         (
-            format!("\n  imv open{extra}.\n\n  arrows/scroll  navigate\n  +/-  zoom\n  f  fullscreen\n  q  quit imv"),
+            format!("\n  {viewer_name} open{extra}.\n\n  arrows/scroll  navigate\n  +/-  zoom\n  f  fullscreen\n  q  quit {viewer_name}"),
             theme.success(),
         )
     } else if app.images_loading {
@@ -75,7 +79,7 @@ fn draw_reader(f: &mut Frame, app: &App) {
     } else if app.image_paths.is_empty() {
         ("\n  No images found.".into(), theme.error())
     } else {
-        ("\n  Opening imv...".into(), theme.warning())
+        (format!("\n  Opening {viewer_name}..."), theme.warning())
     };
 
     f.render_widget(
@@ -85,7 +89,7 @@ fn draw_reader(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(format!(
-            " {} prev chapter  {} next chapter  Esc back  |  imv: arrows pan  scroll/+/- zoom  f fullscreen  q quit imv",
+            " {} prev chapter  {} next chapter  Esc back  |  {viewer_name}: arrows pan  scroll/+/- zoom  f fullscreen  q quit {viewer_name}",
             keys.prev_chapter, keys.next_chapter
         ))
             .style(Style::default().fg(theme.bar_fg()).bg(theme.bar_bg())),

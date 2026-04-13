@@ -24,6 +24,24 @@ pub struct Config {
     pub theme:         ThemeConfig,
     #[serde(default)]
     pub imv:           ImvConfig,
+    #[serde(default)]
+    pub rv:            RvConfig,
+    #[serde(default = "default_viewer")]
+    pub viewer:        String,
+}
+
+fn default_viewer() -> String { "imv".into() }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerKind { Imv, Rv }
+
+impl Config {
+    pub fn viewer_kind(&self) -> ViewerKind {
+        match self.viewer.to_lowercase().as_str() {
+            "rv" => ViewerKind::Rv,
+            _    => ViewerKind::Imv,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,6 +291,7 @@ impl ThemeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ImvConfig {
+    pub binary:  String,
     pub options: ImvOptions,
     pub binds:   HashMap<String, String>,
 }
@@ -316,7 +335,7 @@ impl Default for ImvConfig {
         binds.insert("<scroll-down>".into(),    "pan 0 -50".into());
         binds.insert("<shift-scroll-up>".into(),   "pan 0 500".into());
         binds.insert("<shift-scroll-down>".into(), "pan 0 -500".into());
-        Self { options: ImvOptions::default(), binds }
+        Self { binary: "imv".into(), options: ImvOptions::default(), binds }
     }
 }
 
@@ -336,6 +355,66 @@ impl ImvConfig {
             s.push_str(&format!("{} = {}\n", key, action));
         }
         s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rv viewer
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RvConfig {
+    pub binary:            String,
+    pub scroll_speed:      u32,
+    pub fast_scroll_speed: u32,
+    pub fullscreen:        bool,
+    pub binds:             HashMap<String, String>,
+}
+
+impl Default for RvConfig {
+    fn default() -> Self {
+        let mut binds = HashMap::new();
+        binds.insert("q".into(),      "quit".into());
+        binds.insert("j".into(),      "scroll_down".into());
+        binds.insert("k".into(),      "scroll_up".into());
+        binds.insert("J".into(),      "fast_scroll_down".into());
+        binds.insert("K".into(),      "fast_scroll_up".into());
+        binds.insert("space".into(),  "page_down".into());
+        binds.insert("g".into(),      "top".into());
+        binds.insert("G".into(),      "bottom".into());
+        binds.insert("up".into(),     "zoom_in".into());
+        binds.insert("down".into(),   "zoom_out".into());
+        binds.insert("equals".into(), "zoom_reset".into());
+        binds.insert("f".into(),      "fullscreen".into());
+        binds.insert("h".into(),      "pan_left".into());
+        binds.insert("l".into(),      "pan_right".into());
+        Self {
+            binary:            "rv".into(),
+            scroll_speed:      80,
+            fast_scroll_speed: 600,
+            fullscreen:        false,
+            binds,
+        }
+    }
+}
+
+impl RvConfig {
+    /// Build CLI args for rv from this config.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        args.push("--scroll-speed".into());
+        args.push(self.scroll_speed.to_string());
+        args.push("--fast-scroll-speed".into());
+        args.push(self.fast_scroll_speed.to_string());
+        if self.fullscreen {
+            args.push("--fullscreen".into());
+        }
+        for (key, action) in &self.binds {
+            args.push("--bind".into());
+            args.push(format!("{key}={action}"));
+        }
+        args
     }
 }
 
