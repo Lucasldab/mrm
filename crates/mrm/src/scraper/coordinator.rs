@@ -139,9 +139,20 @@ async fn poll_all(
             }
         };
 
-        // Recompute status regardless (pub_status may have changed)
-        if let Err(e) = db::recompute_status(pool, manhwa.id).await {
-            eprintln!("mrm: recompute_status error for '{}': {e}", manhwa.title);
+        // Only recompute status when something the formula depends on actually
+        // changed: new chapters arrived or the publication status shifted.
+        // Polling-driven recomputes on unchanged inputs caused status flips
+        // that looked random to the user.
+        let pub_changed = series.pub_status != manhwa.pub_status;
+        if pub_changed {
+            if let Err(e) = db::update_pub_status(pool, manhwa.id, &series.pub_status).await {
+                eprintln!("mrm: update_pub_status error for '{}': {e}", manhwa.title);
+            }
+        }
+        if new_count > 0 || pub_changed {
+            if let Err(e) = db::recompute_status(pool, manhwa.id).await {
+                eprintln!("mrm: recompute_status error for '{}': {e}", manhwa.title);
+            }
         }
 
         if new_count > 0 {

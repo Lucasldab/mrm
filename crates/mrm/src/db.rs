@@ -396,6 +396,22 @@ pub async fn update_scroll(
     Ok(pct >= 1.0 && !was_completed)
 }
 
+/// Update stored pub_status when a scraper reports a change.
+pub async fn update_pub_status(
+    pool: &SqlitePool,
+    manhwa_id: i64,
+    pub_status: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE manhwa SET pub_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(pub_status)
+    .bind(manhwa_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Recompute and persist status for a manhwa (mirrors Python's apply_computed_status).
 pub async fn recompute_status(pool: &SqlitePool, manhwa_id: i64) -> Result<Status> {
     let row = sqlx::query(

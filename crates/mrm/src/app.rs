@@ -598,7 +598,13 @@ impl App {
 
         let result = match self.add_search_results.get(self.add_search_sel) {
             Some(r) => r.clone(),
-            None    => return Ok(()),
+            None    => {
+                self.add_search_error = Some(
+                    "No result selected. Run a search and pick a result before pressing Enter."
+                        .into(),
+                );
+                return Ok(());
+            }
         };
 
         self.add_search_loading = true;
