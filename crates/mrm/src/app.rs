@@ -43,6 +43,53 @@ impl Drop for ManagedChild {
 }
 
 // ---------------------------------------------------------------------------
+// Hyprland host fullscreen preservation
+// ---------------------------------------------------------------------------
+//
+// When the viewer (rv/imv) requests compositor fullscreen, Hyprland demotes
+// whatever else on the workspace was fullscreen — including the terminal
+// hosting mrm. On viewer exit, Hyprland does not auto-restore. We snapshot the
+// active window's fullscreen state before launching the viewer and re-assert
+// it on exit. No-op off Hyprland.
+
+#[derive(Clone)]
+pub(crate) struct HostFullscreen {
+    address:          String,
+    internal:         i64,
+    client:           i64,
+}
+
+fn snapshot_host_fullscreen() -> Option<HostFullscreen> {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return None;
+    }
+    let out = std::process::Command::new("hyprctl")
+        .args(["activewindow", "-j"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let address = v.get("address")?.as_str()?.to_string();
+    let internal = v.get("fullscreen").and_then(|x| x.as_i64()).unwrap_or(0);
+    let client   = v.get("fullscreenClient").and_then(|x| x.as_i64()).unwrap_or(0);
+    if internal == 0 && client == 0 { return None; }
+    Some(HostFullscreen { address, internal, client })
+}
+
+fn restore_host_fullscreen(h: &HostFullscreen) {
+    let _ = std::process::Command::new("hyprctl")
+        .args(["dispatch", "focuswindow", &format!("address:{}", h.address)])
+        .status();
+    let _ = std::process::Command::new("hyprctl")
+        .args([
+            "dispatch",
+            "fullscreenstate",
+            &h.internal.to_string(),
+            &h.client.to_string(),
+        ])
+        .status();
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
@@ -78,6 +125,7 @@ pub struct App {
     pub viewer_socket:       Option<String>,
     pub viewer_loaded_count: usize,
     pub viewer_drop_warned:  bool,
+    pub(crate) host_fullscreen: Option<HostFullscreen>,
     pub session_dir:     Option<TempDir>,
     pub error_rx:        Option<mpsc::Receiver<String>>,
 
@@ -143,6 +191,7 @@ impl App {
             viewer_socket:       None,
             viewer_loaded_count: 0,
             viewer_drop_warned:  false,
+            host_fullscreen:     None,
             session_dir:      None,
             error_rx:         None,
             status_msg:       None,
@@ -753,6 +802,9 @@ impl App {
                 self.images_loading  = false;
                 self.image_rx        = None;
                 self.error_rx        = None;
+                if let Some(h) = self.host_fullscreen.take() {
+                    restore_host_fullscreen(&h);
+                }
                 return;
             }
         }
@@ -814,6 +866,9 @@ impl App {
 
     fn launch_viewer(&mut self) {
         use crate::config::ViewerKind;
+        // Snapshot host window's fullscreen state so we can restore it after
+        // the viewer (which steals fullscreen on Hyprland) exits.
+        self.host_fullscreen = snapshot_host_fullscreen();
         match self.viewer_kind {
             ViewerKind::Imv => self.launch_imv(),
             ViewerKind::Rv  => self.launch_rv(),
@@ -940,6 +995,9 @@ impl App {
         self.viewer_socket       = None;
         self.viewer_loaded_count = 0;
         self.viewer_drop_warned  = false;
+        if let Some(h) = self.host_fullscreen.take() {
+            restore_host_fullscreen(&h);
+        }
         self.update_read_progress_sync();
     }
 
