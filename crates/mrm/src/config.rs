@@ -393,7 +393,7 @@ impl Default for RvConfig {
             binary:            "rv".into(),
             scroll_speed:      80,
             fast_scroll_speed: 600,
-            fullscreen:        false,
+            fullscreen:        true,
             binds,
         }
     }

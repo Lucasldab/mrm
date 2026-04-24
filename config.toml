@@ -23,7 +23,7 @@ path = "mrm.db"
 [rv]
 scroll_speed = 80
 fast_scroll_speed = 600
-fullscreen = false
+fullscreen = true
 
 [rv.binds]
 e = "scroll_down"

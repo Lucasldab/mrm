@@ -171,7 +171,7 @@ See the [imv man page](https://man.sr.ht/~exec64/imv/) for all available options
 [rv]
 scroll_speed      = 80    # pixels per scroll tick
 fast_scroll_speed = 600   # pixels per fast-scroll tick
-fullscreen        = false
+fullscreen        = true
 ```
 
 ### Keybinds
