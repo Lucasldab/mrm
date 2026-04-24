@@ -680,8 +680,14 @@ impl App {
         };
 
         match db::insert_manhwa_with_chapters(&self.pool, &series, &result.source).await {
-            Ok(_) => {
+            Ok(new_id) => {
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                // Kick off cover download for the newly added entry so it
+                // shows up on the library grid without requiring a restart.
+                tokio::spawn(crate::cover_cache::preload_covers(
+                    self.cover_cache.cache_dir().clone(),
+                    vec![(new_id, series.cover_url.clone())],
+                ));
                 self.add_search_loading = false;
                 self.set_msg(format!("Added: {}", series.title));
                 // Reset search state and return to library
