@@ -47,34 +47,75 @@ _NAV_LABELS = {"first chapter", "latest chapter", "first", "latest"}
 _DATE_FORMATS = ["%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"]
 
 
-_CHAPTER_META_RE = re.compile(
-    r'number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^}]*?'
-    r'is_premium&quot;:\[0,(?P<prem>true|false)\][^}]*?'
-    r'early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\]'
-)
+# Two known serialized chapter formats appear depending on which Astro island
+# emitted them:
+#   A. asuracomic.net "LatestUpdates" sidebar:
+#      number ... comic_slug ... comic_public_url ... is_premium ... early_access_until
+#   B. asurascans.com series detail page (per-chapter object in the chapter list):
+#      number ... is_premium ... early_access_until ... series_slug ... is_locked
+# Both name the series by its hashless slug ("killer-pietro"); we scope by that.
+_LOCK_PATTERNS = [
+    re.compile(
+        r'number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^{}]*?'
+        r'comic_slug&quot;:\[0,&quot;(?P<slug>[^&]+)&quot;\][^{}]*?'
+        r'is_premium&quot;:\[0,(?P<prem>true|false)\][^{}]*?'
+        r'early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\]'
+    ),
+    re.compile(
+        r'number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^{}]*?'
+        r'is_premium&quot;:\[0,(?P<prem>true|false)\][^{}]*?'
+        r'early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\][^{}]*?'
+        r'series_slug&quot;:\[0,&quot;(?P<slug>[^&]+)&quot;\]'
+    ),
+]
 
 
-def _parse_locked_chapters(raw_html: str) -> set[float]:
-    """Return set of chapter numbers still behind the early-access paywall.
+def _series_path(source_url: str) -> str:
+    """Return the '/comics/{slug}' path component of a series URL."""
+    path = source_url.split("://", 1)[-1]
+    path = path[path.find("/"):] if "/" in path else "/"
+    return path.rstrip("/")
+
+
+# AsuraScans appends a rotating 8-hex-char hash to each series slug
+# (e.g. "killer-pietro-963c76c5"); the serialized chapter blocks expose only
+# the bare slug, so we strip the hash before comparing.
+_HASH_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$")
+
+
+def _series_slug(series_path: str) -> str:
+    """Extract the hashless series slug from a '/comics/{slug-hash}' path."""
+    last = series_path.rsplit("/", 1)[-1]
+    return _HASH_SUFFIX_RE.sub("", last)
+
+
+def _parse_locked_chapters(raw_html: str, series_path: str) -> set[float]:
+    """Return chapter numbers behind the early-access paywall *for this series*.
 
     AsuraScans marks fresh chapters with is_premium=true and an
     early_access_until timestamp; once that timestamp passes the chapter
-    becomes free to read. We skip chapters still in the early-access window.
+    becomes free. Some pages (the site-wide sidebar in particular) embed
+    chapter blocks for many other series too, so we filter by series slug to
+    avoid leaking other series' lock state into this one.
     """
     locked: set[float] = set()
+    slug = _series_slug(series_path)
     now = datetime.now(timezone.utc)
-    for m in _CHAPTER_META_RE.finditer(raw_html):
-        if m.group("prem") != "true":
-            continue
-        eau = m.group("eau")
-        if not eau:
-            continue
-        try:
-            ts = datetime.fromisoformat(eau.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if ts > now:
-            locked.add(float(m.group("num")))
+    for pattern in _LOCK_PATTERNS:
+        for m in pattern.finditer(raw_html):
+            if m.group("slug") != slug:
+                continue
+            if m.group("prem") != "true":
+                continue
+            eau = m.group("eau")
+            if not eau:
+                continue
+            try:
+                ts = datetime.fromisoformat(eau.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts > now:
+                locked.add(float(m.group("num")))
     return locked
 
 
@@ -211,9 +252,16 @@ class AsuraScraper(BaseScraper):
                 status = _STATUS_MAP[t]
                 break
 
-        # Chapters
-        locked = _parse_locked_chapters(resp.text)
-        chapters = self._parse_chapter_links(tree)
+        # Chapters — scope to *this* series. The series page renders no own
+        # chapter list; the only chapter anchors come from a site-wide
+        # "Recent Updates" sidebar shared across pages, so we must filter by
+        # the series' own /comics/{slug} path. AsuraScans rotates each
+        # series' URL hash periodically and 302-redirects old → new, so we
+        # use the final URL after redirects instead of the requested one.
+        final_url = str(getattr(resp, "url", source_url))
+        path = _series_path(final_url)
+        locked = _parse_locked_chapters(resp.text, path)
+        chapters = self._parse_chapter_links(tree, path)
         chapters = [c for c in chapters if c["number"] not in locked]
         chapters.sort(key=lambda c: c["number"])
 
@@ -245,13 +293,19 @@ class AsuraScraper(BaseScraper):
     # Helpers
     # -------------------------------------------------------------------
 
-    def _parse_chapter_links(self, tree) -> list[dict]:
-        """Extract chapter list from <a href=".../chapter/{n}"> links."""
+    def _parse_chapter_links(self, tree, series_path: str) -> list[dict]:
+        """Extract chapter list from <a href=".../chapter/{n}"> links.
+
+        series_path is the '/comics/{slug}' prefix of the current series; we
+        ignore links that don't start with it so the site-wide Recent Updates
+        sidebar can't leak other series' chapters into this one.
+        """
         chapters = []
         seen_numbers: set[float] = set()
         seen_urls: set[str] = set()
+        prefix = series_path + "/chapter/"
 
-        for a in tree.css("a[href*='/chapter/']"):
+        for a in tree.css(f"a[href^='{prefix}']"):
             href = a.attrs.get("href", "") or ""
             if not href or href in seen_urls:
                 continue
