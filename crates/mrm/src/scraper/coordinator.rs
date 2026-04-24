@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +27,14 @@ use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
 pub enum ScraperEvent {
     /// One or more manhwa have new chapters. TUI should refresh the library list.
     NewChapters { titles: Vec<String> },
+    /// Discovery pass found N new unknown manhwa across enabled sources.
+    NewDiscoveries { count: usize },
 }
+
+/// Minimum interval between discovery polls. The chapter poll fires much more
+/// often; we gate discovery to once per day so we don't hammer source homepages.
+const DISCOVERY_MIN_INTERVAL_HOURS: i64 = 23;
+const DISCOVERY_META_KEY: &str = "last_discovery_poll_at";
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -182,6 +190,94 @@ async fn poll_all(
         }).await;
     }
 
+    // Piggyback the discovery pass on the same tick, but gated so it runs at
+    // most once a day regardless of how often the coordinator wakes up.
+    if should_run_discovery(pool).await {
+        match run_discovery(pool, registry, quiet).await {
+            Ok(count) if count > 0 => {
+                let _ = scraper_tx.send(ScraperEvent::NewDiscoveries { count }).await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log!("mrm: discovery error: {e}");
+            }
+        }
+    }
+
     log!("mrm: poll complete");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+async fn should_run_discovery(pool: &SqlitePool) -> bool {
+    let last = match db::get_discovery_meta(pool, DISCOVERY_META_KEY).await {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let last: Option<DateTime<Utc>> = last
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&Utc));
+    match last {
+        Some(t) => (Utc::now() - t).num_hours() >= DISCOVERY_MIN_INTERVAL_HOURS,
+        None    => true,
+    }
+}
+
+/// Walk every enabled scraper, call latest_chapters(), and upsert any entries
+/// not already in the library into discovered_manhwa. Returns how many new
+/// rows were inserted (existing + dismissed entries don't count).
+async fn run_discovery(
+    pool: &SqlitePool,
+    registry: &HashMap<&'static str, Box<dyn Scraper>>,
+    quiet: bool,
+) -> Result<usize> {
+    macro_rules! log {
+        ($($arg:tt)*) => { if !quiet { eprintln!($($arg)*); } };
+    }
+    log!("mrm: discovery started");
+
+    let mut new_count = 0usize;
+    for (name, scraper) in registry {
+        let entries = match scraper.latest_chapters().await {
+            Ok(e) => e,
+            Err(e) => {
+                log!("mrm: discovery '{name}' failed: {e}");
+                continue;
+            }
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        for entry in entries {
+            match db::upsert_discovery(
+                pool,
+                name,
+                &entry.source_url,
+                &entry.title,
+                entry.cover_url.as_deref(),
+                entry.chapter_number,
+                entry.released_at.as_deref(),
+            ).await {
+                Ok(true)  => new_count += 1,
+                Ok(false) => {}
+                Err(e)    => log!("mrm: discovery upsert error: {e}"),
+            }
+        }
+    }
+
+    // Record the poll timestamp even if nothing new — otherwise we'd retry on
+    // the very next coordinator tick.
+    if let Err(e) = db::set_discovery_meta(
+        pool,
+        DISCOVERY_META_KEY,
+        &Utc::now().to_rfc3339(),
+    ).await {
+        log!("mrm: discovery meta write failed: {e}");
+    }
+
+    log!("mrm: discovery complete: {new_count} new");
+    Ok(new_count)
 }

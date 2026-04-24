@@ -1,6 +1,7 @@
 pub mod library;
 pub mod detail;
 pub mod search;
+pub mod discover;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -23,6 +24,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_status_picker(f, app);
         }
         Screen::Search => search::draw(f, app),
+        Screen::Discover => discover::draw(f, app),
     }
 }
 

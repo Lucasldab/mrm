@@ -183,6 +183,22 @@ impl Chapter {
 }
 
 // ---------------------------------------------------------------------------
+// Discovery (newly detected manhwa not yet in library)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Discovery {
+    pub id:             i64,
+    pub source:         String,
+    pub source_url:     String,
+    pub title:          String,
+    pub cover_url:      Option<String>,
+    pub chapter_number: Option<f64>,
+    pub released_at:    Option<String>,
+    pub first_seen_at:  Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -193,6 +209,7 @@ pub enum Screen {
     Reader  { manhwa_id: i64, chapter_id: i64 },
     StatusPicker { manhwa_id: i64 },
     Search,
+    Discover,
 }
 
 // ---------------------------------------------------------------------------

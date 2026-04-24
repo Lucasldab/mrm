@@ -257,7 +257,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let msg = app
         .status_msg
         .as_deref()
-        .unwrap_or("h/l move  j/k row  Enter open  / search  a add  d delete  q quit");
+        .unwrap_or("h/l move  j/k row  Enter open  / search  a add  D discover  d delete  q quit");
 
     let bar = Paragraph::new(msg).style(
         Style::default()
@@ -314,6 +314,10 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(format!(" {}    ", keys.add), key_style),
             Span::raw("add"),
+        ]),
+        Line::from(vec![
+            Span::styled(" D    ", key_style),
+            Span::raw("discover"),
         ]),
         Line::from(vec![
             Span::styled(format!(" {}    ", keys.delete), key_style),

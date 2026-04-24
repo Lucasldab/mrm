@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use crate::cover_cache::CoverCache;
-use crate::types::{AppEvent, Chapter, Manhwa, Screen, SortMode, Status};
+use crate::types::{AppEvent, Chapter, Discovery, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
 // ---------------------------------------------------------------------------
@@ -148,6 +148,17 @@ pub struct App {
     pub cover_protocols: HashMap<i64, StatefulProtocol>,
     pub cover_tick: u8,
 
+    // Discover screen state — undismissed candidates found by the coordinator's
+    // daily latest-chapters pass. Covers go in a separate cache so their ids
+    // can't collide with library manhwa ids on disk.
+    pub discoveries:        Vec<Discovery>,
+    pub discover_sel:       usize,
+    pub discover_grid_cols: usize,
+    pub discover_cover_cache:     CoverCache,
+    pub discover_cover_protocols: HashMap<i64, StatefulProtocol>,
+    pub discover_adding:    bool,
+    pub discover_error:     Option<String>,
+
     // Grid layout (computed during render, used for navigation)
     pub grid_cols: usize,
 
@@ -206,6 +217,13 @@ impl App {
             picker,
             cover_protocols:         HashMap::new(),
             cover_tick:              0,
+            discoveries:             Vec::new(),
+            discover_sel:            0,
+            discover_grid_cols:      1,
+            discover_cover_cache:    CoverCache::with_subdir(Some("discover")),
+            discover_cover_protocols: HashMap::new(),
+            discover_adding:         false,
+            discover_error:          None,
             grid_cols:               1,
             keys:                    config.keys.clone(),
             theme:                   config.theme.clone(),
@@ -271,6 +289,18 @@ impl App {
                             self.cover_protocols.remove(&id);
                         }
                     }
+                    // Same sweep for Discover covers.
+                    if !self.discoveries.is_empty() {
+                        self.discover_cover_cache.reload_from_disk_ids(
+                            self.discoveries.iter().map(|d| (d.id, d.cover_url.as_deref())),
+                        );
+                        let stale: Vec<i64> = self.discover_cover_protocols.keys().copied().collect();
+                        for id in stale {
+                            if self.discover_cover_cache.get(id).is_none() {
+                                self.discover_cover_protocols.remove(&id);
+                            }
+                        }
+                    }
                 }
             }
             AppEvent::DataRefreshed => {
@@ -283,9 +313,6 @@ impl App {
     }
 
     /// Handle a ScraperEvent from the background coordinator.
-    ///
-    /// Currently only NewChapters is defined. It triggers a full library
-    /// refresh so new chapters appear in the TUI without user action.
     pub async fn handle_scraper_event(
         &mut self,
         event: crate::scraper::ScraperEvent,
@@ -303,6 +330,14 @@ impl App {
                         self.set_msg(format!("New chapters in {count} titles"));
                     }
                 }
+            }
+            ScraperEvent::NewDiscoveries { count } => {
+                // Refresh so the Discover screen shows them immediately if
+                // the user has it open, and surface a banner either way.
+                self.refresh_discoveries().await?;
+                self.set_msg(format!(
+                    "{count} new manhwa discovered — press D to browse"
+                ));
             }
         }
         Ok(())
@@ -353,6 +388,7 @@ impl App {
             Screen::Reader { manhwa_id, chapter_id }  => self.handle_reader_key(key, manhwa_id, chapter_id).await?,
             Screen::StatusPicker { manhwa_id }        => self.handle_status_picker_key(key, manhwa_id).await?,
             Screen::Search                            => self.handle_search_key(key).await?,
+            Screen::Discover                          => self.handle_discover_key(key).await?,
         }
         Ok(())
     }
@@ -425,6 +461,11 @@ impl App {
             self.add_search_sel = 0;
             self.add_search_input_active = true;
             self.screen = Screen::Search;
+        } else if k == KeyCode::Char('D') {
+            // Capital D (shift+d) opens Discover — lowercase 'd' is delete.
+            self.refresh_discoveries().await?;
+            self.discover_sel = 0;
+            self.screen = Screen::Discover;
         } else if k == self.keys.sort() {
             self.sort_mode = self.sort_mode.next();
             self.library_sel = 0;
@@ -585,6 +626,46 @@ impl App {
                 self.add_search_sel = self.add_search_sel.saturating_sub(1);
             } else if k == KeyCode::Enter || k == self.keys.open() {
                 self.do_add_manhwa().await?;
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Discover keys
+    // -----------------------------------------------------------------------
+
+    async fn handle_discover_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.discover_adding { return Ok(()); }
+        let k = key.code;
+        let count = self.discoveries.len();
+        let cols = self.discover_grid_cols.max(1);
+
+        if k == KeyCode::Esc || k == self.keys.back() {
+            self.screen = Screen::Library;
+            self.discover_error = None;
+        } else if k == self.keys.down() || k == KeyCode::Down {
+            if count > 0 {
+                let next = self.discover_sel + cols;
+                self.discover_sel = if next < count { next } else { count - 1 };
+            }
+        } else if k == self.keys.up() || k == KeyCode::Up {
+            self.discover_sel = self.discover_sel.saturating_sub(cols);
+        } else if k == self.keys.right() || k == KeyCode::Right {
+            if count > 0 { self.discover_sel = (self.discover_sel + 1).min(count - 1); }
+        } else if k == self.keys.left() || k == KeyCode::Left {
+            self.discover_sel = self.discover_sel.saturating_sub(1);
+        } else if k == self.keys.top() {
+            self.discover_sel = 0;
+        } else if k == self.keys.bottom() {
+            self.discover_sel = count.saturating_sub(1);
+        } else if k == KeyCode::Char('a') || k == KeyCode::Enter || k == self.keys.open() {
+            if count > 0 {
+                self.do_add_discovery().await?;
+            }
+        } else if k == KeyCode::Char('x') {
+            if count > 0 {
+                self.do_dismiss_discovery().await?;
             }
         }
         Ok(())
@@ -1049,6 +1130,115 @@ impl App {
         let protocol = picker.new_resize_protocol(img);
         self.cover_protocols.insert(manhwa_id, protocol);
         self.cover_protocols.get_mut(&manhwa_id)
+    }
+
+    /// Same as get_cover_protocol but for the Discover cache namespace.
+    pub fn get_discover_cover_protocol(&mut self, discover_id: i64) -> Option<&mut StatefulProtocol> {
+        if self.discover_cover_protocols.contains_key(&discover_id) {
+            return self.discover_cover_protocols.get_mut(&discover_id);
+        }
+        let img = self.discover_cover_cache.get(discover_id)?.clone();
+        let picker = self.picker.as_mut()?;
+        let protocol = picker.new_resize_protocol(img);
+        self.discover_cover_protocols.insert(discover_id, protocol);
+        self.discover_cover_protocols.get_mut(&discover_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Discover
+    // -----------------------------------------------------------------------
+
+    /// Load undismissed discoveries from the DB and spawn a background preload
+    /// for any covers not yet on disk. Called when opening the Discover screen
+    /// and whenever the coordinator signals new finds.
+    pub async fn refresh_discoveries(&mut self) -> Result<()> {
+        self.discoveries = db::fetch_discoveries(&self.pool).await?;
+        let list: Vec<(i64, Option<String>)> = self
+            .discoveries
+            .iter()
+            .map(|d| (d.id, d.cover_url.clone()))
+            .collect();
+        tokio::spawn(crate::cover_cache::preload_covers(
+            self.discover_cover_cache.cache_dir().clone(),
+            list,
+        ));
+        if self.discover_sel >= self.discoveries.len() {
+            self.discover_sel = self.discoveries.len().saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    /// Fetch the selected discovery's full series data and insert into the
+    /// library. Removes the entry from discovered_manhwa on success and spawns
+    /// a cover preload for the library copy.
+    pub async fn do_add_discovery(&mut self) -> Result<()> {
+        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
+        use crate::db;
+
+        let discovery = match self.discoveries.get(self.discover_sel) {
+            Some(d) => d.clone(),
+            None    => return Ok(()),
+        };
+
+        self.discover_adding = true;
+        self.discover_error  = None;
+
+        let scraper: Box<dyn Scraper> = match discovery.source.as_str() {
+            "mangadex" => Box::new(MangaDexScraper::new()),
+            "mangack"  => Box::new(MangackScraper::new()),
+            "asura"    => Box::new(AsuraScraper::new(
+                self.config.sources.get("asura")
+                    .and_then(|s| s.scraper_dir.as_deref())
+                    .unwrap_or(".").into(),
+            )),
+            other => {
+                self.discover_error = Some(format!("Unknown source: {other}"));
+                self.discover_adding = false;
+                return Ok(());
+            }
+        };
+
+        let series = match scraper.get_series(&discovery.source_url).await {
+            Ok(s)  => s,
+            Err(e) => {
+                self.discover_error = Some(format!("Fetch failed: {e}"));
+                self.discover_adding = false;
+                return Ok(());
+            }
+        };
+
+        match db::insert_manhwa_with_chapters(&self.pool, &series, &discovery.source).await {
+            Ok(new_id) => {
+                let _ = db::delete_discovery(&self.pool, discovery.id).await;
+                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                tokio::spawn(crate::cover_cache::preload_covers(
+                    self.cover_cache.cache_dir().clone(),
+                    vec![(new_id, series.cover_url.clone())],
+                ));
+                self.refresh_discoveries().await?;
+                self.set_msg(format!("Added: {}", series.title));
+                self.discover_adding = false;
+            }
+            Err(e) => {
+                self.discover_error   = Some(e.to_string());
+                self.discover_adding  = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Dismiss the selected discovery (soft-delete so it won't resurface on
+    /// future discovery polls).
+    pub async fn do_dismiss_discovery(&mut self) -> Result<()> {
+        let id = match self.discoveries.get(self.discover_sel) {
+            Some(d) => d.id,
+            None    => return Ok(()),
+        };
+        db::dismiss_discovery(&self.pool, id).await?;
+        self.discover_cover_protocols.remove(&id);
+        self.discover_cover_cache.invalidate(id);
+        self.refresh_discoveries().await?;
+        Ok(())
     }
 }
 

@@ -246,6 +246,34 @@ async fn run_once(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> 
         eprintln!("\nmrm: no new chapters");
     }
 
+    // Discovery pass (once-mode always runs it to make manual triggering easy;
+    // the TUI/daemon paths gate it to once per 23h via discovery_meta).
+    eprintln!("mrm: discovery pass...");
+    let mut new_disc = 0usize;
+    for (name, scraper) in &registry {
+        let entries = match scraper.latest_chapters().await {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("  discovery '{name}' failed: {e}");
+                continue;
+            }
+        };
+        for entry in entries {
+            if let Ok(true) = db::upsert_discovery(
+                &pool,
+                name,
+                &entry.source_url,
+                &entry.title,
+                entry.cover_url.as_deref(),
+                entry.chapter_number,
+                entry.released_at.as_deref(),
+            ).await {
+                new_disc += 1;
+            }
+        }
+    }
+    eprintln!("mrm: {new_disc} new discoveries");
+
     Ok(())
 }
 
@@ -309,6 +337,12 @@ async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> 
             app.cover_cache.cache_dir().clone(),
             preload_list,
         ));
+    }
+
+    // Load any pending discoveries from the previous session so the Discover
+    // screen is populated on first open without waiting for a fresh poll.
+    if let Err(e) = app.refresh_discoveries().await {
+        eprintln!("mrm: initial discovery load failed: {e}");
     }
 
     // Set up terminal

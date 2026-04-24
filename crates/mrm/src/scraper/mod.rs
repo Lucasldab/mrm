@@ -42,6 +42,18 @@ pub struct SearchResult {
     pub source:     String,   // "mangadex" | "mangack"
 }
 
+/// One entry from a latest_chapters() feed — a candidate for the Discover
+/// screen. We don't fetch the full series metadata here; just enough to show
+/// the cover grid and, on add, hand the source_url to get_series().
+#[derive(Debug, Clone)]
+pub struct DiscoveryEntry {
+    pub title:          String,
+    pub cover_url:      Option<String>,
+    pub source_url:     String,
+    pub chapter_number: Option<f64>,
+    pub released_at:    Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Scraper trait
 // ---------------------------------------------------------------------------
@@ -59,6 +71,13 @@ pub trait Scraper: Send + Sync {
 
     /// Fetch ordered image URLs for a chapter from chapter_url.
     async fn get_chapter_image_urls(&self, chapter_url: &str) -> Result<Vec<String>>;
+
+    /// Return the source's most recently updated series (latest-chapters feed).
+    /// Used by the discovery coordinator to surface unknown manhwa to the user.
+    /// Default is an empty vec for sources that don't implement it yet.
+    async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
+        Ok(Vec::new())
+    }
 }
 
 // ---------------------------------------------------------------------------

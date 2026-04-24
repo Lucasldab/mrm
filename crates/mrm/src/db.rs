@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use sqlx::{sqlite::SqlitePool, Row};
 
-use crate::types::{Chapter, Manhwa, Status};
+use crate::types::{Chapter, Discovery, Manhwa, Status};
 
 // ---------------------------------------------------------------------------
 // Pool
@@ -16,6 +16,37 @@ pub async fn open_db(path: &str) -> Result<SqlitePool> {
     sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
     sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
     sqlx::query("PRAGMA busy_timeout=5000").execute(&pool).await?;
+
+    // Ensure discovery tables exist. The Python side owns the core schema, but
+    // discovery is Rust-only so we create it here. CREATE IF NOT EXISTS is a
+    // no-op on upgrade.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS discovered_manhwa (
+            id             INTEGER PRIMARY KEY,
+            source         TEXT NOT NULL,
+            source_url     TEXT NOT NULL UNIQUE,
+            title          TEXT NOT NULL,
+            cover_url      TEXT,
+            chapter_number REAL,
+            released_at    DATETIME,
+            first_seen_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            dismissed      INTEGER NOT NULL DEFAULT 0
+        )
+        "#,
+    ).execute(&pool).await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_discovered_undismissed \
+         ON discovered_manhwa(dismissed, first_seen_at DESC)",
+    ).execute(&pool).await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS discovery_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    ).execute(&pool).await?;
 
     Ok(pool)
 }
@@ -468,5 +499,132 @@ pub async fn recompute_status(pool: &SqlitePool, manhwa_id: i64) -> Result<Statu
     .await?;
 
     Ok(status)
+}
+
+// ---------------------------------------------------------------------------
+// Discovery queries
+// ---------------------------------------------------------------------------
+
+/// Insert a discovered entry if not already known in either library or
+/// discoveries. Returns true if a new row was inserted.
+pub async fn upsert_discovery(
+    pool: &SqlitePool,
+    source: &str,
+    source_url: &str,
+    title: &str,
+    cover_url: Option<&str>,
+    chapter_number: Option<f64>,
+    released_at: Option<&str>,
+) -> Result<bool> {
+    // Skip if already in library
+    let in_lib: bool = sqlx::query(
+        "SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = ?)",
+    )
+    .bind(source_url)
+    .fetch_one(pool)
+    .await?
+    .try_get::<bool, _>(0)
+    .unwrap_or(false);
+    if in_lib {
+        return Ok(false);
+    }
+
+    let res = sqlx::query(
+        r#"
+        INSERT INTO discovered_manhwa
+            (source, source_url, title, cover_url, chapter_number, released_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_url) DO UPDATE SET
+            title          = excluded.title,
+            cover_url      = COALESCE(excluded.cover_url, cover_url),
+            chapter_number = COALESCE(excluded.chapter_number, chapter_number),
+            released_at    = COALESCE(excluded.released_at, released_at)
+        "#,
+    )
+    .bind(source)
+    .bind(source_url)
+    .bind(title)
+    .bind(cover_url)
+    .bind(chapter_number)
+    .bind(released_at)
+    .execute(pool)
+    .await?;
+
+    // rows_affected() is 1 for INSERT, 2 for ON CONFLICT UPDATE on SQLite —
+    // only the insert path counts as a "new" discovery.
+    Ok(res.rows_affected() == 1)
+}
+
+/// Fetch all undismissed discoveries, newest first.
+pub async fn fetch_discoveries(pool: &SqlitePool) -> Result<Vec<Discovery>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, source, source_url, title, cover_url,
+               chapter_number, released_at, first_seen_at
+        FROM discovered_manhwa
+        WHERE dismissed = 0
+        ORDER BY first_seen_at DESC, id DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(Discovery {
+            id:             row.try_get("id")?,
+            source:         row.try_get("source")?,
+            source_url:     row.try_get("source_url")?,
+            title:          row.try_get("title")?,
+            cover_url:      row.try_get("cover_url")?,
+            chapter_number: row.try_get("chapter_number")?,
+            released_at:    row.try_get("released_at")?,
+            first_seen_at:  row.try_get("first_seen_at")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Mark a discovery as dismissed (soft delete — kept so we don't re-surface it).
+pub async fn dismiss_discovery(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("UPDATE discovered_manhwa SET dismissed = 1 WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Remove a discovery outright (called after the user adds it to the library
+/// so the row in `manhwa` becomes the canonical entry).
+pub async fn delete_discovery(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM discovered_manhwa WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Read a value from the discovery_meta key/value table.
+pub async fn get_discovery_meta(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT value FROM discovery_meta WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get("value").ok()))
+}
+
+/// Write a value to the discovery_meta key/value table.
+pub async fn set_discovery_meta(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 

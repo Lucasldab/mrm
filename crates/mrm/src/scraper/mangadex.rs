@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::{ChapterData, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -229,6 +229,74 @@ impl Scraper for MangaDexScraper {
             .collect();
 
         Ok(urls)
+    }
+
+    /// Fetch recently updated manga as discovery candidates.
+    ///
+    /// Uses GET /manga ordered by latestUploadedChapter desc. MangaDex exposes
+    /// the latest chapter count as attributes.lastChapter but the per-chapter
+    /// release date requires a separate /chapter lookup, which would cost one
+    /// HTTP hit per entry. For discovery purposes the latestUploadedChapter
+    /// order plus the series' updatedAt is good enough — the Discover screen
+    /// shows cover + title, not chapter dates.
+    async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
+        let url = format!("{BASE}/manga");
+        let client = &self.client;
+
+        let resp = super::retry(|| async {
+            let r = client
+                .get(&url)
+                .query(&[
+                    ("limit", "30"),
+                    ("availableTranslatedLanguage[]", "en"),
+                    ("includes[]", "cover_art"),
+                    ("contentRating[]", "safe"),
+                    ("contentRating[]", "suggestive"),
+                    ("contentRating[]", "erotica"),
+                    ("hasAvailableChapters", "true"),
+                    ("order[latestUploadedChapter]", "desc"),
+                ])
+                .send()
+                .await
+                .with_context(|| format!("MangaDex GET {url} failed"))?;
+            let r = r.error_for_status()
+                .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
+            r.json::<serde_json::Value>()
+                .await
+                .with_context(|| format!("MangaDex GET {url} JSON parse failed"))
+        })
+        .await?;
+
+        let empty = vec![];
+        let items = resp["data"].as_array().unwrap_or(&empty);
+
+        let mut out = Vec::new();
+        for item in items {
+            let manga_id = match item["id"].as_str() {
+                Some(id) => id,
+                None => continue,
+            };
+            let attr = &item["attributes"];
+            let title = extract_title(attr);
+            if title.is_empty() {
+                continue;
+            }
+            let cover_url = extract_cover(manga_id, &item["relationships"]);
+            let chapter_number = attr["lastChapter"]
+                .as_str()
+                .and_then(|s| f64::from_str(s).ok());
+            let released_at = attr["updatedAt"].as_str().map(|s| s.to_string());
+
+            out.push(DiscoveryEntry {
+                title,
+                cover_url,
+                source_url: format!("{BASE}/manga/{manga_id}"),
+                chapter_number,
+                released_at,
+            });
+        }
+
+        Ok(out)
     }
 }
 

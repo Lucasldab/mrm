@@ -20,12 +20,29 @@ pub struct CoverCache {
 
 impl CoverCache {
     pub fn new() -> Self {
-        let cache_dir = cache_dir_path();
+        Self::with_subdir(None)
+    }
+
+    /// Build a cover cache rooted at `~/.cache/mrm/covers/{subdir}`. Used to
+    /// keep Discover covers in a namespace separate from the library's so the
+    /// two can't collide on `id.jpg`.
+    pub fn with_subdir(subdir: Option<&str>) -> Self {
+        let mut cache_dir = cache_dir_path();
+        if let Some(s) = subdir {
+            cache_dir.push(s);
+        }
         let _ = std::fs::create_dir_all(&cache_dir);
         Self {
             cache_dir,
             images: HashMap::new(),
         }
+    }
+
+    /// Drop the in-memory entry for an id so the next ensure_loaded/get call
+    /// re-checks disk. Used after a cover file has been removed or replaced
+    /// outside the cache's knowledge.
+    pub fn invalidate(&mut self, id: i64) {
+        self.images.remove(&id);
     }
 
     pub fn cache_dir(&self) -> &PathBuf {
@@ -78,20 +95,30 @@ impl CoverCache {
     /// Re-check disk for any manhwa IDs currently mapped to None.
     /// Called after background preload may have finished downloading.
     pub fn reload_from_disk(&mut self, manhwa_list: &[Manhwa]) {
-        for m in manhwa_list {
-            if m.cover_url.is_none() {
+        self.reload_from_disk_ids(
+            manhwa_list.iter().map(|m| (m.id, m.cover_url.as_deref())),
+        );
+    }
+
+    /// Generic variant that works for any (id, cover_url) iterator — used by
+    /// the Discover cache which doesn't have a Manhwa list.
+    pub fn reload_from_disk_ids<'a, I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (i64, Option<&'a str>)>,
+    {
+        for (id, cover_url) in items {
+            if cover_url.is_none() {
                 continue;
             }
-            // Only re-check entries that are None (not yet loaded)
-            let should_retry = self.images.get(&m.id).map(|v| v.is_none()).unwrap_or(true);
+            let should_retry = self.images.get(&id).map(|v| v.is_none()).unwrap_or(true);
             if !should_retry {
                 continue;
             }
-            let path = self.cache_dir.join(format!("{}.jpg", m.id));
+            let path = self.cache_dir.join(format!("{id}.jpg"));
             if path.exists() {
                 if let Ok(img) = image::open(&path) {
                     let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
-                    self.images.insert(m.id, Some(resized));
+                    self.images.insert(id, Some(resized));
                 }
             }
         }
