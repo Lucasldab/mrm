@@ -39,11 +39,14 @@ pub enum ScraperEvent {
 ///   config      — loaded at startup; poll_interval_minutes controls cadence
 ///   shutdown    — cancelled by main() on Ctrl-C / SIGTERM
 ///   scraper_tx  — sends ScraperEvent to the TUI run_loop
+///   quiet       — when true, suppress stderr progress logs (TUI alternate-screen
+///                 would otherwise get corrupted by mid-render writes)
 pub async fn coordinator_task(
     pool: SqlitePool,
     config: Config,
     shutdown: CancellationToken,
     scraper_tx: mpsc::Sender<ScraperEvent>,
+    quiet: bool,
 ) {
     let interval_secs = config.notifications.poll_interval_minutes * 60;
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -53,7 +56,7 @@ pub async fn coordinator_task(
     interval.tick().await;
 
     // Build the scraper registry once — reuse reqwest::Client across all polls.
-    let registry = build_registry(&config);
+    let registry = build_registry(&config, quiet);
 
     loop {
         tokio::select! {
@@ -61,7 +64,7 @@ pub async fn coordinator_task(
                 break;
             }
             _ = interval.tick() => {
-                let _ = poll_all(&pool, &config, &registry, &scraper_tx).await;
+                let _ = poll_all(&pool, &config, &registry, &scraper_tx, quiet).await;
             }
         }
     }
@@ -71,7 +74,7 @@ pub async fn coordinator_task(
 // Registry
 // ---------------------------------------------------------------------------
 
-fn build_registry(config: &Config) -> HashMap<&'static str, Box<dyn Scraper>> {
+fn build_registry(config: &Config, quiet: bool) -> HashMap<&'static str, Box<dyn Scraper>> {
     let mut registry: HashMap<&'static str, Box<dyn Scraper>> = HashMap::new();
 
     for (name, source_cfg) in &config.sources {
@@ -86,7 +89,9 @@ fn build_registry(config: &Config) -> HashMap<&'static str, Box<dyn Scraper>> {
                 registry.insert("asura", Box::new(AsuraScraper::new(dir)));
             }
             other => {
-                eprintln!("mrm: unknown source '{other}' in config, skipping");
+                if !quiet {
+                    eprintln!("mrm: unknown source '{other}' in config, skipping");
+                }
             }
         }
     }
@@ -103,11 +108,16 @@ async fn poll_all(
     config: &Config,
     registry: &HashMap<&'static str, Box<dyn Scraper>>,
     scraper_tx: &mpsc::Sender<ScraperEvent>,
+    quiet: bool,
 ) -> Result<()> {
-    eprintln!("mrm: poll started");
+    macro_rules! log {
+        ($($arg:tt)*) => { if !quiet { eprintln!($($arg)*); } };
+    }
+
+    log!("mrm: poll started");
 
     let manhwa_list = db::fetch_all_manhwa(pool).await?;
-    eprintln!("mrm: checking {} manhwa", manhwa_list.len());
+    log!("mrm: checking {} manhwa", manhwa_list.len());
 
     let mut updated_titles: Vec<String> = Vec::new();
 
@@ -115,8 +125,8 @@ async fn poll_all(
         let scraper = match registry.get(manhwa.source.as_str()) {
             Some(s) => s,
             None => {
-                eprintln!("mrm: no scraper for source '{}', skipping '{}'",
-                          manhwa.source, manhwa.title);
+                log!("mrm: no scraper for source '{}', skipping '{}'",
+                     manhwa.source, manhwa.title);
                 continue;
             }
         };
@@ -125,7 +135,7 @@ async fn poll_all(
         let series = match scraper.get_series(&manhwa.source_url).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("mrm: failed to fetch '{}': {e}", manhwa.title);
+                log!("mrm: failed to fetch '{}': {e}", manhwa.title);
                 continue;
             }
         };
@@ -134,7 +144,7 @@ async fn poll_all(
         let new_count = match db::upsert_chapters(pool, manhwa.id, &series.chapters).await {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("mrm: upsert error for '{}': {e}", manhwa.title);
+                log!("mrm: upsert error for '{}': {e}", manhwa.title);
                 continue;
             }
         };
@@ -146,17 +156,17 @@ async fn poll_all(
         let pub_changed = series.pub_status != manhwa.pub_status;
         if pub_changed {
             if let Err(e) = db::update_pub_status(pool, manhwa.id, &series.pub_status).await {
-                eprintln!("mrm: update_pub_status error for '{}': {e}", manhwa.title);
+                log!("mrm: update_pub_status error for '{}': {e}", manhwa.title);
             }
         }
         if new_count > 0 || pub_changed {
             if let Err(e) = db::recompute_status(pool, manhwa.id).await {
-                eprintln!("mrm: recompute_status error for '{}': {e}", manhwa.title);
+                log!("mrm: recompute_status error for '{}': {e}", manhwa.title);
             }
         }
 
         if new_count > 0 {
-            eprintln!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
+            log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
             updated_titles.push(manhwa.title.clone());
         }
     }
@@ -172,6 +182,6 @@ async fn poll_all(
         }).await;
     }
 
-    eprintln!("mrm: poll complete");
+    log!("mrm: poll complete");
     Ok(())
 }

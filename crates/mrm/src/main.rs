@@ -190,7 +190,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, config: config::Config) -> Result<()
     let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
 
     // Run coordinator directly (not as a spawned task — this IS the main task)
-    scraper::coordinator_task(pool, config, shutdown, _tx).await;
+    scraper::coordinator_task(pool, config, shutdown, _tx, false).await;
 
     eprintln!("mrm: daemon stopped");
     Ok(())
@@ -284,7 +284,7 @@ async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> 
         let pool_c     = pool.clone();
         let shutdown_c = shutdown.clone();
         let tx_c       = scraper_tx.clone();
-        tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c))
+        tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c, true))
     });
 
     let picker = {
