@@ -36,6 +36,7 @@ pub struct ChapterData {
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title:      String,
+    #[allow(dead_code)]
     pub cover_url:  Option<String>,
     pub source_url: String,
     pub pub_status: String,
@@ -61,6 +62,7 @@ pub struct DiscoveryEntry {
 #[async_trait]
 pub trait Scraper: Send + Sync {
     /// Unique source identifier (e.g. "mangadex").
+    #[allow(dead_code)]
     fn source_name(&self) -> &'static str;
 
     /// Search for a manhwa title. Returns up to 20 results.

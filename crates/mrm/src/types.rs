@@ -154,6 +154,7 @@ impl Manhwa {
 #[derive(Debug, Clone)]
 pub struct Chapter {
     pub id:          i64,
+    #[allow(dead_code)]
     pub manhwa_id:   i64,
     pub number:      f64,
     pub title:       Option<String>,
@@ -194,7 +195,9 @@ pub struct Discovery {
     pub title:          String,
     pub cover_url:      Option<String>,
     pub chapter_number: Option<f64>,
+    #[allow(dead_code)]
     pub released_at:    Option<String>,
+    #[allow(dead_code)]
     pub first_seen_at:  Option<String>,
 }
 
@@ -220,6 +223,7 @@ pub enum Screen {
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
     Tick,
+    #[allow(dead_code)]
     DataRefreshed,
     ScraperMsg(crate::scraper::ScraperEvent),
 }

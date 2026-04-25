@@ -17,6 +17,7 @@ use serde::Deserialize;
 pub struct Config {
     pub sources:       HashMap<String, SourceConfig>,
     pub notifications: NotificationsConfig,
+    #[allow(dead_code)]
     pub db:            DbConfig,
     #[serde(default)]
     pub keys:          KeysConfig,
@@ -46,6 +47,7 @@ impl Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SourceConfig {
+    #[allow(dead_code)]
     pub base_url: String,
     pub enabled:  bool,
     /// Path to the project root where the Python scraper package lives.
@@ -61,6 +63,7 @@ pub struct NotificationsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DbConfig {
+    #[allow(dead_code)]
     pub path: String,
 }
 
