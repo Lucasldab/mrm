@@ -12,6 +12,16 @@ use crate::cover_cache::CoverCache;
 use crate::types::{AppEvent, Chapter, Discovery, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
+/// Stable cache id for a search result, derived from its source_url so the
+/// same series hits the on-disk cache across queries.
+pub fn search_result_id(source_url: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    source_url.hash(&mut h);
+    h.finish() as i64
+}
+
 // ---------------------------------------------------------------------------
 // ManagedChild — kills child viewer on drop (prevents orphan processes)
 // ---------------------------------------------------------------------------
@@ -134,6 +144,9 @@ pub struct App {
     // AddSearch screen state
     pub add_search_query:        String,
     pub add_search_results:      Vec<crate::scraper::SearchResult>,
+    pub add_search_grid_cols:    usize,
+    pub search_cover_cache:      CoverCache,
+    pub search_cover_protocols:  HashMap<i64, StatefulProtocol>,
     pub add_search_sel:          usize,
     pub add_search_loading:      bool,
     pub add_search_error:        Option<String>,
@@ -208,6 +221,9 @@ impl App {
             status_msg:       None,
             add_search_query:        String::new(),
             add_search_results:      Vec::new(),
+            add_search_grid_cols:    1,
+            search_cover_cache:      CoverCache::with_subdir(Some("search")),
+            search_cover_protocols:  HashMap::new(),
             add_search_sel:          0,
             add_search_loading:      false,
             add_search_error:        None,
@@ -298,6 +314,20 @@ impl App {
                         for id in stale {
                             if self.discover_cover_cache.get(id).is_none() {
                                 self.discover_cover_protocols.remove(&id);
+                            }
+                        }
+                    }
+                    // Same sweep for Search covers.
+                    if !self.add_search_results.is_empty() {
+                        self.search_cover_cache.reload_from_disk_ids(
+                            self.add_search_results.iter().map(|r| {
+                                (search_result_id(&r.source_url), r.cover_url.as_deref())
+                            }),
+                        );
+                        let stale: Vec<i64> = self.search_cover_protocols.keys().copied().collect();
+                        for id in stale {
+                            if self.search_cover_cache.get(id).is_none() {
+                                self.search_cover_protocols.remove(&id);
                             }
                         }
                     }
@@ -607,6 +637,7 @@ impl App {
                 self.screen = Screen::Library;
                 self.add_search_query.clear();
                 self.add_search_results.clear();
+                self.search_cover_protocols.clear();
                 self.add_search_input_active = true;
             } else if k == KeyCode::Enter || k == self.keys.open() {
                 self.search_all_scrapers().await?;
@@ -616,14 +647,26 @@ impl App {
                 self.add_search_query.push(c);
             }
         } else {
-            // Browsing results
+            // Browsing results grid
+            let count = self.add_search_results.len();
+            let cols  = self.add_search_grid_cols.max(1);
             if k == KeyCode::Esc || k == self.keys.back() || k == self.keys.input_mode() {
                 self.add_search_input_active = true;
             } else if k == self.keys.down() || k == KeyCode::Down {
-                let len = self.add_search_results.len();
-                if len > 0 { self.add_search_sel = (self.add_search_sel + 1).min(len - 1); }
+                if count > 0 {
+                    let next = self.add_search_sel + cols;
+                    self.add_search_sel = if next < count { next } else { count - 1 };
+                }
             } else if k == self.keys.up() || k == KeyCode::Up {
+                self.add_search_sel = self.add_search_sel.saturating_sub(cols);
+            } else if k == self.keys.right() || k == KeyCode::Right {
+                if count > 0 { self.add_search_sel = (self.add_search_sel + 1).min(count - 1); }
+            } else if k == self.keys.left() || k == KeyCode::Left {
                 self.add_search_sel = self.add_search_sel.saturating_sub(1);
+            } else if k == self.keys.top() {
+                self.add_search_sel = 0;
+            } else if k == self.keys.bottom() {
+                self.add_search_sel = count.saturating_sub(1);
             } else if k == KeyCode::Enter || k == self.keys.open() {
                 self.do_add_manhwa().await?;
             }
@@ -717,7 +760,19 @@ impl App {
         self.add_search_results = merged;
         self.add_search_sel     = 0;
         self.add_search_loading = false;
-        self.add_search_input_active = false;  // move focus to results list
+        self.add_search_input_active = false;  // move focus to results grid
+        self.search_cover_protocols.clear();
+
+        // Kick off cover preload for all results so the grid fills in covers.
+        let preload: Vec<(i64, Option<String>)> = self.add_search_results.iter()
+            .map(|r| (search_result_id(&r.source_url), r.cover_url.clone()))
+            .collect();
+        if !preload.is_empty() {
+            tokio::spawn(crate::cover_cache::preload_covers(
+                self.search_cover_cache.cache_dir().clone(),
+                preload,
+            ));
+        }
         Ok(())
     }
 
@@ -776,6 +831,7 @@ impl App {
                 self.add_search_results = Vec::new();
                 self.add_search_sel     = 0;
                 self.add_search_input_active = true;
+                self.search_cover_protocols.clear();
                 self.screen = crate::types::Screen::Library;
             }
             Err(e) => {
@@ -1142,6 +1198,18 @@ impl App {
         let protocol = picker.new_resize_protocol(img);
         self.discover_cover_protocols.insert(discover_id, protocol);
         self.discover_cover_protocols.get_mut(&discover_id)
+    }
+
+    /// Same as get_cover_protocol but for the Search cache namespace.
+    pub fn get_search_cover_protocol(&mut self, result_id: i64) -> Option<&mut StatefulProtocol> {
+        if self.search_cover_protocols.contains_key(&result_id) {
+            return self.search_cover_protocols.get_mut(&result_id);
+        }
+        let img = self.search_cover_cache.get(result_id)?.clone();
+        let picker = self.picker.as_mut()?;
+        let protocol = picker.new_resize_protocol(img);
+        self.search_cover_protocols.insert(result_id, protocol);
+        self.search_cover_protocols.get_mut(&result_id)
     }
 
     // -----------------------------------------------------------------------
