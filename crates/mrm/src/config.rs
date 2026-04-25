@@ -405,11 +405,12 @@ impl Default for RvConfig {
 impl RvConfig {
     /// Build CLI args for rv from this config.
     pub fn to_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        args.push("--scroll-speed".into());
-        args.push(self.scroll_speed.to_string());
-        args.push("--fast-scroll-speed".into());
-        args.push(self.fast_scroll_speed.to_string());
+        let mut args = vec![
+            "--scroll-speed".into(),
+            self.scroll_speed.to_string(),
+            "--fast-scroll-speed".into(),
+            self.fast_scroll_speed.to_string(),
+        ];
         if self.fullscreen {
             args.push("--fullscreen".into());
         }

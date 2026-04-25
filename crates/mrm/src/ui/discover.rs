@@ -95,7 +95,7 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
 
     let sel = app.discover_sel.min(total.saturating_sub(1));
     let sel_row = sel / grid_cols;
-    let total_rows = (total + grid_cols - 1) / grid_cols;
+    let total_rows = total.div_ceil(grid_cols);
 
     let scroll_row = if sel_row < grid_rows / 2 {
         0
