@@ -572,7 +572,57 @@ impl App {
                 let chapter_id = ch.id;
                 self.open_reader(manhwa_id, chapter_id).await?;
             }
+        } else if k == KeyCode::Char('R') {
+            self.do_refresh_metadata(manhwa_id).await?;
         }
+        Ok(())
+    }
+
+    /// Re-fetch series metadata from the source and persist title/cover/
+    /// pub_status/description. Triggered by `R` on the detail screen.
+    pub async fn do_refresh_metadata(&mut self, manhwa_id: i64) -> Result<()> {
+        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
+
+        let (source, source_url) = match self.current_manhwa.as_ref() {
+            Some(m) => (m.source.clone(), m.source_url.clone()),
+            None    => return Ok(()),
+        };
+
+        self.set_msg("Refreshing metadata...");
+
+        let scraper: Box<dyn Scraper> = match source.as_str() {
+            "mangadex" => Box::new(MangaDexScraper::new()),
+            "mangack"  => Box::new(MangackScraper::new()),
+            "asura"    => Box::new(AsuraScraper::new(
+                self.config.sources.get("asura")
+                    .and_then(|s| s.scraper_dir.as_deref())
+                    .unwrap_or(".").into(),
+            )),
+            other => {
+                self.set_msg(format!("Unknown source: {other}"));
+                return Ok(());
+            }
+        };
+
+        let series = match scraper.get_series(&source_url).await {
+            Ok(s)  => s,
+            Err(e) => { self.set_msg(format!("Refresh failed: {e}")); return Ok(()); }
+        };
+
+        db::update_manhwa_metadata(&self.pool, manhwa_id, &series).await?;
+        self.refresh_detail(manhwa_id).await?;
+        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+
+        // Re-pull cover so any new artwork shows up — invalidate cached
+        // protocol so the next render re-creates it from the fresh image.
+        self.cover_protocols.remove(&manhwa_id);
+        self.cover_cache.invalidate(manhwa_id);
+        tokio::spawn(crate::cover_cache::preload_covers(
+            self.cover_cache.cache_dir().clone(),
+            vec![(manhwa_id, series.cover_url.clone())],
+        ));
+
+        self.set_msg("Metadata refreshed");
         Ok(())
     }
 

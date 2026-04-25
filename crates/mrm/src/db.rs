@@ -17,6 +17,12 @@ pub async fn open_db(path: &str) -> Result<SqlitePool> {
     sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
     sqlx::query("PRAGMA busy_timeout=5000").execute(&pool).await?;
 
+    // Migration: add `description` column on manhwa for series synopsis text.
+    // SQLite has no ADD COLUMN IF NOT EXISTS — silently ignore the duplicate
+    // column error when the migration has already run.
+    let _ = sqlx::query("ALTER TABLE manhwa ADD COLUMN description TEXT")
+        .execute(&pool).await;
+
     // Ensure discovery tables exist. The Python side owns the core schema, but
     // discovery is Rust-only so we create it here. CREATE IF NOT EXISTS is a
     // no-op on upgrade.
@@ -67,6 +73,7 @@ pub async fn fetch_all_manhwa(pool: &SqlitePool) -> Result<Vec<Manhwa>> {
             m.pub_status,
             m.status,
             m.status_override,
+            m.description,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -94,6 +101,7 @@ pub async fn fetch_all_manhwa(pool: &SqlitePool) -> Result<Vec<Manhwa>> {
             pub_status:      row.try_get("pub_status")?,
             status:          Status::from_str(row.try_get("status")?),
             status_override: row.try_get::<i64, _>("status_override")? != 0,
+            description:     row.try_get("description").unwrap_or(None),
             unread,
         });
     }
@@ -106,7 +114,7 @@ pub async fn fetch_manhwa(pool: &SqlitePool, manhwa_id: i64) -> Result<Manhwa> {
         r#"
         SELECT
             m.id, m.title, m.cover_url, m.source, m.source_url,
-            m.pub_status, m.status, m.status_override,
+            m.pub_status, m.status, m.status_override, m.description,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -133,6 +141,7 @@ pub async fn fetch_manhwa(pool: &SqlitePool, manhwa_id: i64) -> Result<Manhwa> {
         pub_status:      row.try_get("pub_status")?,
         status:          Status::from_str(row.try_get("status")?),
         status_override: row.try_get::<i64, _>("status_override")? != 0,
+        description:     row.try_get("description").unwrap_or(None),
         unread,
     })
 }
@@ -184,8 +193,8 @@ pub async fn insert_manhwa_with_chapters(
     let row = sqlx::query(
         r#"
         INSERT INTO manhwa (title, source, source_url, cover_url, pub_status,
-                            status, status_override, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'looked_into', 0, CURRENT_TIMESTAMP)
+                            description, status, status_override, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'looked_into', 0, CURRENT_TIMESTAMP)
         RETURNING id
         "#,
     )
@@ -194,6 +203,7 @@ pub async fn insert_manhwa_with_chapters(
     .bind(&series.source_url)
     .bind(&series.cover_url)
     .bind(&series.pub_status)
+    .bind(&series.description)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -425,6 +435,34 @@ pub async fn update_scroll(
 
     // Newly completed = pct hit 1.0 AND wasn't completed before
     Ok(pct >= 1.0 && !was_completed)
+}
+
+/// Refresh stored title/cover/pub_status/description from a freshly scraped
+/// SeriesData. Used by the "refresh metadata" action on the detail screen.
+pub async fn update_manhwa_metadata(
+    pool: &SqlitePool,
+    manhwa_id: i64,
+    series: &crate::scraper::SeriesData,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE manhwa
+        SET title       = ?,
+            cover_url   = COALESCE(?, cover_url),
+            pub_status  = ?,
+            description = COALESCE(?, description),
+            updated_at  = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(&series.title)
+    .bind(&series.cover_url)
+    .bind(&series.pub_status)
+    .bind(&series.description)
+    .bind(manhwa_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Update stored pub_status when a scraper reports a change.

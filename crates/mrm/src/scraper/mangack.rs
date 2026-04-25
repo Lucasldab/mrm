@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::{ChapterData, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,6 +50,10 @@ static SEL_TD_TH: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("td, th").unwrap());
 static SEL_A_CHAPTER: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"a[href*="/chapter/"]"#).unwrap());
+static SEL_DESCRIPTION: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(
+        r#".summary__content, .description-summary, .summary, .post-content_item .summary-content, [itemprop="description"]"#,
+    ).unwrap());
 
 // Compiled regex patterns (lazy, compiled once)
 static RE_NEW_BADGE: LazyLock<regex::Regex> =
@@ -175,6 +179,33 @@ impl Scraper for MangackScraper {
         Ok(series)
     }
 
+    /// Fetch the homepage and surface recently updated series as discovery
+    /// candidates. The MangaCK homepage lists series with their latest chapter
+    /// link; we reuse the search-result parser to harvest /manga/ links and
+    /// pair each with the highest chapter number found in its parent block.
+    async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
+        let url = format!("{BASE}/");
+        let client = &self.client;
+
+        let text = super::retry(|| async {
+            let r = client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("MangaCK GET {url} failed"))?;
+            r.text()
+                .await
+                .with_context(|| format!("MangaCK GET {url} body read failed"))
+        })
+        .await?;
+
+        let entries = parse_homepage_latest(&text);
+
+        sleep(DELAY).await;
+
+        Ok(entries)
+    }
+
     /// Fetch ordered image URLs for a chapter from chapter_url.
     async fn get_chapter_image_urls(&self, chapter_url: &str) -> Result<Vec<String>> {
         let client = &self.client;
@@ -260,6 +291,7 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
         });
 
     let pub_status = find_status(&document);
+    let description = find_description(&document);
 
     let now = chrono::Utc::now();
 
@@ -271,8 +303,63 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
         cover_url,
         source_url: source_url.to_string(),
         pub_status,
+        description,
         chapters,
     })
+}
+
+fn find_description(document: &Html) -> Option<String> {
+    let node = document.select(&SEL_DESCRIPTION).next()?;
+    let text = node.text().collect::<Vec<_>>().join(" ");
+    let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+fn parse_homepage_latest(html: &str) -> Vec<DiscoveryEntry> {
+    let document = Html::parse_document(html);
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for element in document.select(&SEL_A_MANGA) {
+        let href = match element.value().attr("href") {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+        let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
+        if title.is_empty() || title.len() < 2 || seen.contains(&href) {
+            continue;
+        }
+        if href.matches('/').count() < 4 {
+            continue;
+        }
+        seen.insert(href.clone());
+
+        let cover_url = find_cover_in_ancestors(&element);
+
+        // Look at the parent block for a sibling /chapter/ link to extract
+        // the most recent chapter number for this series.
+        let chapter_number = element
+            .parent()
+            .and_then(scraper::ElementRef::wrap)
+            .and_then(|p| p.parent().and_then(scraper::ElementRef::wrap).or(Some(p)))
+            .and_then(|ancestor| {
+                ancestor.select(&SEL_A_CHAPTER).find_map(|a| {
+                    let label = a.text().collect::<Vec<_>>().join("");
+                    let href = a.value().attr("href").unwrap_or("");
+                    extract_chapter_number(&label, href)
+                })
+            });
+
+        out.push(DiscoveryEntry {
+            title,
+            cover_url,
+            source_url: href,
+            chapter_number,
+            released_at: None,
+        });
+    }
+
+    out
 }
 
 fn parse_chapter_images(html: &str) -> Vec<String> {

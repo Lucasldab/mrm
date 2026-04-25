@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -11,23 +11,34 @@ use crate::app::App;
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    let _manhwa = match &app.current_manhwa {
+    let manhwa = match &app.current_manhwa {
         Some(m) => m,
         None    => return,
     };
+
+    let has_desc = manhwa.description.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+
+    // Reserve a description panel only when the source provided one. Some
+    // series simply have no synopsis and we hide the block entirely so the
+    // chapter list keeps the full screen.
+    let desc_height: u16 = if has_desc { 7 } else { 0 };
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
+            Constraint::Length(desc_height),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(area);
 
     draw_header(f, app, rows[0]);
-    draw_chapters(f, app, rows[1]);
-    draw_statusbar(f, app, rows[2]);
+    if desc_height > 0 {
+        draw_description(f, app, rows[1]);
+    }
+    draw_chapters(f, app, rows[2]);
+    draw_statusbar(f, app, rows[3]);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -82,6 +93,23 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(theme.border()));
 
     let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
+}
+
+fn draw_description(f: &mut Frame, app: &App, area: Rect) {
+    let manhwa = app.current_manhwa.as_ref().unwrap();
+    let theme = &app.theme;
+    let text = manhwa.description.as_deref().unwrap_or("");
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Description ")
+        .border_style(Style::default().fg(theme.border()));
+
+    let para = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(theme.text()))
+        .wrap(Wrap { trim: true });
     f.render_widget(para, area);
 }
 
@@ -161,7 +189,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let default_hint = format!(
-        "{}/{} move  {} read  {} status  {} unread{}  Esc back",
+        "{}/{} move  {} read  {} status  {} unread  R refresh{}  Esc back",
         keys.down, keys.up, keys.open, keys.set_status, keys.mark_unread, override_hint
     );
     let msg = app.status_msg.as_deref().unwrap_or(default_hint.as_str());

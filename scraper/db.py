@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS manhwa (
                     'paused','completed','dropped'
                 )) NOT NULL DEFAULT 'looked_into',
     status_override INTEGER NOT NULL DEFAULT 0,  -- 1 = user manually set, don't auto-update
+    description TEXT,
     added_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );

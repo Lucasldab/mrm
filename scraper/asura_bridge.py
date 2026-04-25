@@ -35,11 +35,23 @@ async def run(command: str, arg: str) -> str:
 
         elif command == "get_series":
             series = await scraper.get_series(arg)
+            # Description is optional — older scraper versions don't populate
+            # it, so default to None on the wire so the Rust side can store
+            # it as NULL without a special case.
+            series.setdefault("description", None)
             return json.dumps(series)
 
         elif command == "get_chapter_image_urls":
             urls = await scraper.get_chapter_image_urls(arg)
             return json.dumps(urls)
+
+        elif command == "latest_chapters":
+            # Optional — only available if the underlying scraper exposes it.
+            fn = getattr(scraper, "latest_chapters", None)
+            if fn is None:
+                return json.dumps([])
+            results = await fn()
+            return json.dumps(results)
 
         else:
             raise ValueError(f"Unknown command: {command}")

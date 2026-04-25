@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{ChapterData, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Struct
@@ -107,6 +107,10 @@ impl Scraper for AsuraScraper {
             cover_url:  data["cover_url"].as_str().map(|s| s.to_string()),
             source_url: data["source_url"].as_str().unwrap_or(source_url).to_string(),
             pub_status: data["pub_status"].as_str().unwrap_or("ongoing").to_string(),
+            description: data["description"].as_str().and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() { None } else { Some(t.to_string()) }
+            }),
             chapters,
         })
     }
@@ -116,5 +120,37 @@ impl Scraper for AsuraScraper {
         let urls: Vec<String> = serde_json::from_str(&json_str)
             .context("Failed to parse asura chapter images JSON")?;
         Ok(urls)
+    }
+
+    /// Surface AsuraScans' "Latest Updates" sidebar entries as discovery
+    /// candidates. Delegates to the Python bridge since the site is behind
+    /// Cloudflare and the existing scraper already knows how to fetch.
+    async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
+        // The bridge command may not be present on older installs; treat any
+        // failure as "no discoveries from asura" rather than surfacing it as
+        // an error — Discover should still work for other sources.
+        let json_str = match self.run_bridge(&["latest_chapters", ""]).await {
+            Ok(s)  => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let items: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
+            Ok(v)  => v,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let source_url = item["source_url"].as_str().unwrap_or("").to_string();
+            if title.is_empty() || source_url.is_empty() { continue; }
+            out.push(DiscoveryEntry {
+                title,
+                cover_url:      item["cover_url"].as_str().map(|s| s.to_string()),
+                source_url,
+                chapter_number: item["chapter_number"].as_f64(),
+                released_at:    item["released_at"].as_str().map(|s| s.to_string()),
+            });
+        }
+        Ok(out)
     }
 }

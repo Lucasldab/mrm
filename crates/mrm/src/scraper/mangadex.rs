@@ -76,6 +76,16 @@ fn extract_title(attributes: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Extract series description from MangaDex attributes.
+/// Preference: "en" → first available value. Returns None when blank.
+fn extract_description(attributes: &serde_json::Value) -> Option<String> {
+    let d = &attributes["description"];
+    let raw = d["en"].as_str()
+        .or_else(|| d.as_object().and_then(|m| m.values().next().and_then(|v| v.as_str())))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
 /// Build cover URL from the cover_art relationship entry.
 fn extract_cover(manga_id: &str, relationships: &serde_json::Value) -> Option<String> {
     relationships.as_array()?.iter().find_map(|rel| {
@@ -180,6 +190,7 @@ impl Scraper for MangaDexScraper {
         let item = &resp["data"];
         let attr = &item["attributes"];
         let cover_url = extract_cover(&manga_id, &item["relationships"]);
+        let description = extract_description(attr);
 
         let chapters = self._fetch_all_chapters(&manga_id).await?;
 
@@ -188,6 +199,7 @@ impl Scraper for MangaDexScraper {
             cover_url,
             source_url: source_url.to_string(),
             pub_status: map_status(attr["status"].as_str()),
+            description,
             chapters,
         })
     }

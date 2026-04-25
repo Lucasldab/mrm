@@ -20,6 +20,7 @@ pub struct SeriesData {
     pub cover_url:  Option<String>,
     pub source_url: String,
     pub pub_status: String,   // "ongoing" | "hiatus" | "completed"
+    pub description: Option<String>,
     pub chapters:   Vec<ChapterData>,
 }
 
@@ -36,7 +37,6 @@ pub struct ChapterData {
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title:      String,
-    #[allow(dead_code)]
     pub cover_url:  Option<String>,
     pub source_url: String,
     pub pub_status: String,

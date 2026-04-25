@@ -131,6 +131,7 @@ pub struct Manhwa {
     pub pub_status:  String,   // "ongoing" | "hiatus" | "completed"
     pub status:      Status,
     pub status_override: bool,
+    pub description: Option<String>,
     pub unread:      u32,      // computed, not stored
 }
 
