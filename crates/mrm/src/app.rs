@@ -429,6 +429,12 @@ impl App {
 
     async fn do_delete_manhwa(&mut self, manhwa_id: i64) -> Result<()> {
         db::delete_manhwa(&self.pool, manhwa_id).await?;
+        // SQLite reuses freed rowids — drop the cached cover file and any
+        // in-memory entry so a future series that lands on this id doesn't
+        // inherit stale artwork.
+        let _ = std::fs::remove_file(self.cover_cache.cache_dir().join(format!("{manhwa_id}.jpg")));
+        self.cover_cache.invalidate(manhwa_id);
+        self.cover_protocols.remove(&manhwa_id);
         self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
         // Keep cursor in bounds
         let max = self.manhwa_list.len().saturating_sub(1);
@@ -615,9 +621,11 @@ impl App {
 
         // Re-pull cover so any new artwork shows up — invalidate cached
         // protocol so the next render re-creates it from the fresh image.
+        // Use refetch_covers (not preload) so a stale on-disk file gets
+        // overwritten instead of skipped.
         self.cover_protocols.remove(&manhwa_id);
         self.cover_cache.invalidate(manhwa_id);
-        tokio::spawn(crate::cover_cache::preload_covers(
+        tokio::spawn(crate::cover_cache::refetch_covers(
             self.cover_cache.cache_dir().clone(),
             vec![(manhwa_id, series.cover_url.clone())],
         ));

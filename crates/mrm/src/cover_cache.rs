@@ -132,6 +132,21 @@ impl CoverCache {
 /// Download covers that are not yet cached on disk.
 /// Meant to be spawned with tokio::spawn. Silently skips failures.
 pub async fn preload_covers(cache_dir: PathBuf, manhwa_list: Vec<(i64, Option<String>)>) {
+    preload_covers_inner(cache_dir, manhwa_list, false).await;
+}
+
+/// Like preload_covers but overwrites any existing cache file. Use after a
+/// metadata refresh that may have changed the cover URL — otherwise the
+/// stale on-disk file would mask the new one.
+pub async fn refetch_covers(cache_dir: PathBuf, manhwa_list: Vec<(i64, Option<String>)>) {
+    preload_covers_inner(cache_dir, manhwa_list, true).await;
+}
+
+async fn preload_covers_inner(
+    cache_dir: PathBuf,
+    manhwa_list: Vec<(i64, Option<String>)>,
+    force: bool,
+) {
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
@@ -154,7 +169,7 @@ pub async fn preload_covers(cache_dir: PathBuf, manhwa_list: Vec<(i64, Option<St
             None => continue,
         };
         let path = cache_dir.join(format!("{id}.jpg"));
-        if path.exists() {
+        if path.exists() && !force {
             continue;
         }
         let client = client.clone();
