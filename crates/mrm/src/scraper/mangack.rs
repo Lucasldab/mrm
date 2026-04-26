@@ -179,12 +179,12 @@ impl Scraper for MangackScraper {
         Ok(series)
     }
 
-    /// Fetch the homepage and surface recently updated series as discovery
-    /// candidates. The MangaCK homepage lists series with their latest chapter
-    /// link; we reuse the search-result parser to harvest /manga/ links and
-    /// pair each with the highest chapter number found in its parent block.
+    /// Fetch the /updates/ feed and surface recently updated series as
+    /// discovery candidates. MangaCK's homepage no longer lists current
+    /// updates — only /updates/ does — so we harvest /manga/ links from
+    /// there and pair each with the highest chapter number in its block.
     async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
-        let url = format!("{BASE}/");
+        let url = format!("{BASE}/updates/");
         let client = &self.client;
 
         let text = super::retry(|| async {

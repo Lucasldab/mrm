@@ -274,6 +274,72 @@ class AsuraScraper(BaseScraper):
         }
 
     # -------------------------------------------------------------------
+    # Discovery
+    # -------------------------------------------------------------------
+
+    async def latest_chapters(self) -> list[dict]:
+        """Surface the homepage's recent updates as discovery candidates.
+
+        The homepage embeds two things we need:
+          - cover anchors:  <a href="/comics/{slug-hash}"><img alt=title src=cover/></a>
+          - chapter anchors: <a href="/comics/{slug-hash}/chapter/{n}">...</a>
+
+        We pair them up by series path. A series only shows up if both the
+        cover card and at least one chapter link were rendered on the page.
+        """
+        from selectolax.parser import HTMLParser
+
+        resp = await self.get(f"{self.base_url}/")
+        tree = HTMLParser(resp.text)
+
+        cards: dict[str, tuple[str, Optional[str]]] = {}
+        for a in tree.css("a[href*='/comics/']"):
+            href = a.attrs.get("href", "") or ""
+            if "/chapter/" in href:
+                continue
+            path = href.split("?", 1)[0].rstrip("/")
+            if not path.startswith("/comics/") or path in cards:
+                continue
+            img = a.css_first("img[src*='covers']")
+            if not img:
+                continue
+            title = (img.attrs.get("alt") or "").strip()
+            if not title or len(title) < 2:
+                continue
+            cover_url = img.attrs.get("src") or img.attrs.get("data-src")
+            cards[path] = (title, cover_url)
+
+        latest: dict[str, float] = {}
+        chapter_re = re.compile(r"^(/comics/[^/]+)/chapter/(\d+(?:\.\d+)?)")
+        for a in tree.css("a[href*='/comics/'][href*='/chapter/']"):
+            href = a.attrs.get("href", "") or ""
+            m = chapter_re.match(href)
+            if not m:
+                continue
+            path = m.group(1)
+            try:
+                num = float(m.group(2))
+            except ValueError:
+                continue
+            if num > latest.get(path, -1.0):
+                latest[path] = num
+
+        out = []
+        for path, num in latest.items():
+            info = cards.get(path)
+            if not info:
+                continue
+            title, cover_url = info
+            out.append({
+                "title":          title,
+                "cover_url":      cover_url,
+                "source_url":     self.base_url + path,
+                "chapter_number": num,
+                "released_at":    None,
+            })
+        return out
+
+    # -------------------------------------------------------------------
     # Chapter images
     # -------------------------------------------------------------------
 
