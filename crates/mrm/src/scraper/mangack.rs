@@ -295,7 +295,8 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
 
     let now = chrono::Utc::now();
 
-    let mut chapters = parse_chapter_links(&document, now);
+    let series_slug = extract_series_slug(source_url);
+    let mut chapters = parse_chapter_links(&document, now, series_slug.as_deref());
     chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(SeriesData {
@@ -471,6 +472,7 @@ fn find_cover_in_ancestors(element: &scraper::ElementRef<'_>) -> Option<String> 
 fn parse_chapter_links(
     document: &Html,
     now: chrono::DateTime<chrono::Utc>,
+    series_slug: Option<&str>,
 ) -> Vec<ChapterData> {
     let mut chapters = Vec::new();
     let mut seen_numbers: HashSet<u64> = HashSet::new();
@@ -480,6 +482,16 @@ fn parse_chapter_links(
             Some(h) => h.to_string(),
             None => continue,
         };
+
+        // Drop chapter links that don't belong to this series — sidebars,
+        // "popular chapters", and related-manga widgets all bleed `/chapter/`
+        // links from other series into the same DOM. Without this filter we
+        // pick up unrelated chapters and assign them wrong numbers.
+        if let Some(slug) = series_slug {
+            if !chapter_href_matches_slug(&href, slug) {
+                continue;
+            }
+        }
 
         let raw_label: String = element
             .text()
@@ -499,8 +511,13 @@ fn parse_chapter_links(
             .trim()
             .to_string();
 
-        // Extract chapter number — skip if cannot determine
-        let number = match extract_chapter_number(&label, &href) {
+        // Extract chapter number — skip if cannot determine.
+        // For the URL pass, use the post-slug portion so digits inside the
+        // series slug can never be mistaken for the chapter number.
+        let url_for_extract = series_slug
+            .and_then(|slug| chapter_url_after_slug(&href, slug))
+            .unwrap_or_else(|| href.clone());
+        let number = match extract_chapter_number(&label, &url_for_extract) {
             Some(n) => n,
             None => continue,
         };
@@ -558,6 +575,74 @@ fn extract_chapter_date(
     }
 
     parse_relative_date(&date_text, now)
+}
+
+// ---------------------------------------------------------------------------
+// Private helper: series-slug derivation + chapter-href slug matching
+// ---------------------------------------------------------------------------
+
+/// Extract the series slug from a MangaCK series URL.
+///
+/// Series URLs are `{base}/manga/{slug}/` (possibly with query/fragment).
+/// Returns `None` if the URL doesn't look like a series page.
+pub(crate) fn extract_series_slug(source_url: &str) -> Option<String> {
+    let path = source_url
+        .split('?').next().unwrap_or(source_url)
+        .split('#').next().unwrap_or(source_url);
+
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    while let Some(seg) = segments.next() {
+        if seg.eq_ignore_ascii_case("manga") {
+            let slug = segments.next()?.trim();
+            if slug.is_empty() {
+                return None;
+            }
+            return Some(slug.to_string());
+        }
+    }
+    None
+}
+
+/// Does this `/chapter/...` href belong to the series with the given slug?
+///
+/// MangaCK chapter URLs are `{base}/chapter/{slug}-chapter-{n}/`. We isolate
+/// the path component after `/chapter/` and require it to start with
+/// `{slug}-` so unrelated `/chapter/` links elsewhere on the page (sidebars,
+/// "popular updates" widgets, related-manga blocks) get filtered out.
+pub(crate) fn chapter_href_matches_slug(href: &str, slug: &str) -> bool {
+    let path = href
+        .split('?').next().unwrap_or(href)
+        .split('#').next().unwrap_or(href);
+
+    let after = match path.split("/chapter/").nth(1) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Compare case-insensitively to be tolerant of host-side casing quirks,
+    // but require the slug to be followed by `-chapter-` (the canonical
+    // separator) — `solo-leveling-2` must not match `solo-leveling`.
+    let needle = format!("{slug}-chapter-");
+    after.len() >= needle.len()
+        && after[..needle.len()].eq_ignore_ascii_case(&needle)
+}
+
+/// Return the portion of a chapter href after `{slug}-`, so chapter-number
+/// extraction can run on a string that contains only the chapter component
+/// and never the series slug. Returns `None` when the href doesn't match.
+pub(crate) fn chapter_url_after_slug(href: &str, slug: &str) -> Option<String> {
+    let path = href
+        .split('?').next().unwrap_or(href)
+        .split('#').next().unwrap_or(href);
+
+    let after = path.split("/chapter/").nth(1)?;
+    let prefix = format!("{slug}-");
+    if after.len() < prefix.len()
+        || !after[..prefix.len()].eq_ignore_ascii_case(&prefix)
+    {
+        return None;
+    }
+    Some(after[prefix.len()..].to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -759,5 +844,100 @@ mod tests {
     fn chapter_number_nav_button_returns_none() {
         // Nav buttons contain no chapter number
         assert_eq!(extract_chapter_number("First Chapter", "/chapter/first/"), None);
+    }
+
+    // --- extract_series_slug ---
+
+    #[test]
+    fn series_slug_basic() {
+        assert_eq!(
+            extract_series_slug("https://mangack.com/manga/solo-leveling/"),
+            Some("solo-leveling".to_string())
+        );
+    }
+
+    #[test]
+    fn series_slug_with_query_fragment() {
+        assert_eq!(
+            extract_series_slug("https://mangack.com/manga/the-100/?ref=home#top"),
+            Some("the-100".to_string())
+        );
+    }
+
+    #[test]
+    fn series_slug_missing_returns_none() {
+        assert_eq!(extract_series_slug("https://mangack.com/"), None);
+    }
+
+    // --- chapter_href_matches_slug ---
+
+    #[test]
+    fn chapter_href_matches_correct_series() {
+        assert!(chapter_href_matches_slug(
+            "https://mangack.com/chapter/solo-leveling-chapter-200/",
+            "solo-leveling",
+        ));
+    }
+
+    #[test]
+    fn chapter_href_rejects_other_series() {
+        // Sidebar bleed: a different manga's chapter must not be accepted.
+        assert!(!chapter_href_matches_slug(
+            "https://mangack.com/chapter/tower-of-god-chapter-590/",
+            "solo-leveling",
+        ));
+    }
+
+    #[test]
+    fn chapter_href_rejects_slug_prefix_collision() {
+        // `solo-leveling-2` must not match the `solo-leveling` series — the
+        // `-chapter-` separator guards against partial-prefix collisions.
+        assert!(!chapter_href_matches_slug(
+            "https://mangack.com/chapter/solo-leveling-2-chapter-1/",
+            "solo-leveling",
+        ));
+    }
+
+    #[test]
+    fn chapter_href_rejects_non_chapter_url() {
+        assert!(!chapter_href_matches_slug(
+            "https://mangack.com/manga/solo-leveling/",
+            "solo-leveling",
+        ));
+    }
+
+    // --- chapter_url_after_slug ---
+
+    #[test]
+    fn url_after_slug_returns_chapter_segment() {
+        assert_eq!(
+            chapter_url_after_slug(
+                "https://mangack.com/chapter/the-100-chapter-42/",
+                "the-100",
+            ),
+            Some("chapter-42/".to_string()),
+        );
+    }
+
+    #[test]
+    fn url_after_slug_with_digit_slug_isolates_chapter_number() {
+        // Slug contains digits ("the-100"); regex on the full href could
+        // mis-pick "100" as the chapter. Slicing after the slug keeps only
+        // the chapter component, so number extraction sees just "chapter-7/".
+        let post = chapter_url_after_slug(
+            "https://mangack.com/chapter/the-100-chapter-7/",
+            "the-100",
+        )
+        .unwrap();
+        assert_eq!(extract_chapter_number("", &post), Some(7.0));
+    }
+
+    #[test]
+    fn url_after_slug_returns_none_for_other_series() {
+        assert!(chapter_url_after_slug(
+            "https://mangack.com/chapter/another-manga-chapter-5/",
+            "the-100",
+        )
+        .is_none());
     }
 }
