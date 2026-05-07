@@ -183,6 +183,7 @@ async fn poll_all(
     if !updated_titles.is_empty() {
         if config.notifications.enabled {
             notifier::send_grouped(&updated_titles);
+            notifier::send_grouped_remote(&config.notifications, &updated_titles).await;
         }
         // Signal TUI to refresh library list; ignore send error (TUI may be exiting)
         let _ = scraper_tx.send(ScraperEvent::NewChapters {
