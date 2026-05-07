@@ -7,6 +7,16 @@ edition = "2021"
 name = "mrm"
 path = "src/main.rs"
 
+[features]
+# Default install: desktop notifications only (notify-rust / D-Bus).
+default = []
+
+# Optional push-notification dispatch to ntfy.sh (or a self-hosted ntfy
+# server). Adds a remote HTTP POST to the existing desktop notification
+# path; pairs with the `[notifications.ntfy]` block in config.toml.
+# Build with: `cargo build --release --features ntfy`.
+ntfy = []
+
 [dependencies]
 anyhow     = "1"
 chrono     = { version = "0.4", features = ["clock"] }

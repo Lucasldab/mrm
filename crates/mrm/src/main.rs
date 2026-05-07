@@ -3,6 +3,8 @@ mod config;
 mod cover_cache;
 mod db;
 mod notifier;
+#[cfg(feature = "ntfy")]
+mod ntfy;
 mod scraper;
 mod types;
 mod ui;
@@ -241,6 +243,7 @@ async fn run_once(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> 
 
     if !updated.is_empty() && config.notifications.enabled {
         notifier::send_grouped(&updated);
+        notifier::send_grouped_remote(&config.notifications, &updated).await;
         eprintln!("\nmrm: notified for {} title(s)", updated.len());
     } else {
         eprintln!("\nmrm: no new chapters");

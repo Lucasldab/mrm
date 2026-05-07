@@ -59,7 +59,46 @@ pub struct SourceConfig {
 pub struct NotificationsConfig {
     pub enabled:               bool,
     pub poll_interval_minutes: u64,
+
+    /// Optional push-notification dispatch via ntfy.sh.
+    ///
+    /// Parsed even when the `ntfy` Cargo feature is OFF so the field stays
+    /// stable across builds and config files remain portable; the dispatcher
+    /// is the only code that actually reads it, and that code is gated.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "ntfy"), allow(dead_code))]
+    pub ntfy: Option<NtfyConfig>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "ntfy"), allow(dead_code))]
+pub struct NtfyConfig {
+    /// Per-user kill switch. Defaults to true so a present-but-bare
+    /// `[notifications.ntfy]` block works out of the box.
+    #[serde(default = "default_ntfy_enabled")]
+    pub enabled: bool,
+
+    /// Server base URL — `https://ntfy.sh` for the public service, or your
+    /// self-hosted instance.
+    #[serde(default = "default_ntfy_server")]
+    pub server: String,
+
+    /// Topic identifier. Treat as a shared secret — anyone subscribed to it
+    /// can read your notifications.
+    pub topic: String,
+
+    /// Optional ntfy `Priority` header value: `min`, `low`, `default`, `high`,
+    /// or `max`.
+    #[serde(default)]
+    pub priority: Option<String>,
+
+    /// Optional bearer token for self-hosted ntfy servers with auth.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_ntfy_enabled() -> bool { true }
+fn default_ntfy_server()  -> String { "https://ntfy.sh".into() }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DbConfig {

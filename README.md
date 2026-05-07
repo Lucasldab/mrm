@@ -102,6 +102,27 @@ mrm --once
 
 All keybinds can be customized in `config.toml` under `[keys]`.
 
+## Optional: Phone Push Notifications (ntfy)
+
+Off by default — desktop notifications via `notify-send` are the only thing the standard install enables. To also push release alerts to your phone, opt in at build time and configure an [ntfy](https://ntfy.sh) topic.
+
+```sh
+cargo build --release --features ntfy
+```
+
+Pick a hard-to-guess topic name (treat it as a shared secret — anyone subscribed can read your notifications), install the [ntfy app](https://ntfy.sh/), and subscribe to that same topic. Then add to `~/.config/mrm/config.toml`:
+
+```toml
+[notifications.ntfy]
+enabled  = true
+server   = "https://ntfy.sh"          # or your self-hosted instance
+topic    = "mrm-pick-something-random"
+priority = "default"                  # optional: min|low|default|high|max
+# auth_token = "tk_..."               # optional, self-hosted with auth only
+```
+
+Run `mrm --daemon` (or `mrm --once`) and new chapters now fan out to both the desktop and your phone. The block is silently ignored on builds without the `ntfy` feature, so the same `config.toml` works on machines that opt out.
+
 ## Theme
 
 Colors are configurable under `[theme]` in `config.toml`. Supports named colors, hex (`#RRGGBB`), and 256-color indices.
