@@ -26,6 +26,106 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Search => search::draw(f, app),
         Screen::Discover => discover::draw(f, app),
     }
+    if app.show_help {
+        draw_help_overlay(f, app);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Help overlay — `?` toggles, any key dismisses.
+// ---------------------------------------------------------------------------
+
+fn draw_help_overlay(f: &mut Frame, app: &App) {
+    use ratatui::text::Span;
+
+    let theme = &app.theme;
+    let area = f.area();
+
+    // Pick keybind set based on current screen
+    let (title, entries): (&str, Vec<(&str, &str)>) = match &app.screen {
+        Screen::Library => ("Library", vec![
+            ("j / k / ↑ / ↓", "Move selection"),
+            ("h / l / ← / →", "Grid navigation"),
+            ("g g / G",       "Jump to top / bottom"),
+            ("Enter",         "Open series detail"),
+            ("/",             "Search library"),
+            ("a",             "Add series (cross-source search)"),
+            ("d",             "Discover feed"),
+            ("s",             "Set status"),
+            ("r",             "Refresh from sources"),
+            ("x",             "Delete series"),
+            ("?",             "This help"),
+            ("q",             "Quit"),
+        ]),
+        Screen::Detail { .. } => ("Series Detail", vec![
+            ("j / k / ↑ / ↓", "Select chapter"),
+            ("g g / G",       "Jump to first / last chapter"),
+            ("Enter",         "Read chapter"),
+            ("m",             "Mark chapter unread"),
+            ("s",             "Set series status"),
+            ("c",             "Clear status override"),
+            ("Esc",           "Back to library"),
+            ("?",             "This help"),
+        ]),
+        Screen::Search => ("Add Series", vec![
+            ("i",     "Enter input mode (type query)"),
+            ("Enter", "Submit / select result"),
+            ("Esc",   "Exit input mode / back"),
+            ("Tab",   "Switch source"),
+            ("?",     "This help"),
+        ]),
+        Screen::Discover => ("Discover", vec![
+            ("j / k / ↑ / ↓", "Select discovery"),
+            ("h / l / ← / →", "Grid navigation"),
+            ("Enter / a",     "Add to library"),
+            ("x",             "Dismiss"),
+            ("Esc",           "Back to library"),
+            ("?",             "This help"),
+        ]),
+        Screen::StatusPicker { .. } => ("Status Picker", vec![
+            ("j / k / ↑ / ↓", "Select status"),
+            ("Enter",         "Apply"),
+            ("Esc",           "Cancel"),
+        ]),
+        Screen::Reader { .. } => ("Reader", vec![
+            ("(handled by external viewer)", ""),
+        ]),
+    };
+
+    // Compute popup size: 60% wide, ~4 rows of chrome + 1 row per entry, max 80% tall
+    let popup_w = (area.width as f32 * 0.6).clamp(40.0, 100.0) as u16;
+    let popup_h = ((entries.len() + 4) as u16).min((area.height as f32 * 0.8) as u16);
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Help — {} ", title))
+        .border_style(Style::default().fg(crate::config::ThemeConfig::parse_color(&theme.accent)))
+        .style(Style::default().fg(crate::config::ThemeConfig::parse_color(&theme.text)));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let key_color  = crate::config::ThemeConfig::parse_color(&theme.accent);
+    let desc_color = crate::config::ThemeConfig::parse_color(&theme.text);
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(k, d)| Line::from(vec![
+            Span::styled(format!("  {:<16}", k), Style::default().fg(key_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", d),      Style::default().fg(desc_color)),
+        ]))
+        .chain(std::iter::once(Line::from("")))
+        .chain(std::iter::once(Line::from(Span::styled(
+            "  Press any key to close",
+            Style::default()
+                .fg(crate::config::ThemeConfig::parse_color(&theme.text_secondary))
+                .add_modifier(Modifier::ITALIC),
+        ))))
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ---------------------------------------------------------------------------

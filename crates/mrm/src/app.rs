@@ -185,6 +185,9 @@ pub struct App {
 
     // Vim-style gg: true when first g was pressed, waiting for second
     pub pending_g: bool,
+
+    // Help overlay: `?` toggles, any key dismisses
+    pub show_help: bool,
 }
 
 impl App {
@@ -248,6 +251,7 @@ impl App {
             viewer_kind:             config.viewer_kind(),
             config,
             pending_g: false,
+            show_help: false,
         })
     }
 
@@ -374,6 +378,20 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Help overlay: `?` toggles, any key dismisses.
+        if self.show_help {
+            self.show_help = false;
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('?')
+            && !self.search_active
+            && !self.add_search_input_active
+            && !matches!(self.screen, Screen::Reader { .. })
+        {
+            self.show_help = true;
+            return Ok(());
+        }
+
         if key.code == KeyCode::Char('q')
             && !self.search_active
             && self.screen == Screen::Library
@@ -599,11 +617,7 @@ impl App {
         let scraper: Box<dyn Scraper> = match source.as_str() {
             "mangadex" => Box::new(MangaDexScraper::new()),
             "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new(
-                self.config.sources.get("asura")
-                    .and_then(|s| s.scraper_dir.as_deref())
-                    .unwrap_or(".").into(),
-            )),
+            "asura"    => Box::new(AsuraScraper::new()),
             other => {
                 self.set_msg(format!("Unknown source: {other}"));
                 return Ok(());
@@ -788,7 +802,7 @@ impl App {
 
         let mdx   = MangaDexScraper::new();
         let mck   = MangackScraper::new();
-        let asura = AsuraScraper::new(self.config.sources.get("asura").and_then(|s| s.scraper_dir.as_deref()).unwrap_or(".").into());
+        let asura = AsuraScraper::new();
 
         // Run all searches concurrently; surface errors as status, not crash
         let (mdx_res, mck_res, asura_res) = tokio::join!(
@@ -856,7 +870,7 @@ impl App {
         let scraper: Box<dyn Scraper> = match result.source.as_str() {
             "mangadex" => Box::new(MangaDexScraper::new()),
             "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new(self.config.sources.get("asura").and_then(|s| s.scraper_dir.as_deref()).unwrap_or(".").into())),
+            "asura"    => Box::new(AsuraScraper::new()),
             other      => {
                 self.add_search_error = Some(format!("Unknown source: {other}"));
                 self.add_search_loading = false;
@@ -952,11 +966,8 @@ impl App {
                 .unwrap_or_else(std::env::temp_dir);
             self.session_dir = session_dir;
 
-            let asura_dir: std::path::PathBuf = self.config.sources.get("asura")
-                .and_then(|s| s.scraper_dir.as_deref())
-                .unwrap_or(".").into();
             tokio::spawn(async move {
-                fetch_chapter_images(&source, &url, session_path, tx, err_tx, asura_dir).await;
+                fetch_chapter_images(&source, &url, session_path, tx, err_tx).await;
             });
         }
         Ok(())
@@ -1312,11 +1323,7 @@ impl App {
         let scraper: Box<dyn Scraper> = match discovery.source.as_str() {
             "mangadex" => Box::new(MangaDexScraper::new()),
             "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new(
-                self.config.sources.get("asura")
-                    .and_then(|s| s.scraper_dir.as_deref())
-                    .unwrap_or(".").into(),
-            )),
+            "asura"    => Box::new(AsuraScraper::new()),
             other => {
                 self.discover_error = Some(format!("Unknown source: {other}"));
                 self.discover_adding = false;
@@ -1378,7 +1385,6 @@ async fn fetch_chapter_images(
     session_dir: std::path::PathBuf,
     tx: mpsc::Sender<Option<(usize, Option<std::path::PathBuf>)>>,
     err_tx: mpsc::Sender<String>,
-    asura_scraper_dir: std::path::PathBuf,
 ) {
     use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
     use std::sync::Arc;
@@ -1389,7 +1395,7 @@ async fn fetch_chapter_images(
     let scraper: Box<dyn Scraper> = match source {
         "mangadex" => Box::new(MangaDexScraper::new()),
         "mangack"  => Box::new(MangackScraper::new()),
-        "asura"    => Box::new(AsuraScraper::new(asura_scraper_dir)),
+        "asura"    => Box::new(AsuraScraper::new()),
         other => {
             let _ = err_tx.send(format!("Unknown source: {other}")).await;
             let _ = tx.send(None).await;

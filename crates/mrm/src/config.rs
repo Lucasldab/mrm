@@ -52,6 +52,11 @@ pub struct SourceConfig {
     pub enabled:  bool,
     /// Path to the project root where the Python scraper package lives.
     /// Required for sources that delegate to Python (e.g. asura).
+    /// DEPRECATED: legacy path to the Python `scraper/` directory used by the
+    /// old Asura subprocess bridge. Asura now runs in-process via `rquest`;
+    /// this field is parsed-but-ignored so existing `config.toml`s don't
+    /// break on upgrade. Remove from your config at your leisure.
+    #[allow(dead_code)]
     pub scraper_dir: Option<String>,
 }
 

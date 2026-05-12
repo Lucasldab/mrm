@@ -25,7 +25,8 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
 - An image viewer — either [imv](https://sr.ht/~exec64/imv/) or [rv](https://github.com/Lucasldab/readingViewer) (with `rv-msg`) on `PATH`
 - notify-send (optional, for desktop notifications)
-- Python 3.11+ with `scraper/requirements.txt` installed in `scraper/.venv` (only if AsuraScans source is enabled)
+
+Asura/Cloudflare-fronted sources work out of the box — no Python or venv needed. TLS impersonation is handled in-process by [rquest](https://crates.io/crates/rquest).
 
 ## Installation
 
@@ -56,7 +57,6 @@ enabled = true
 [sources.asura]
 base_url = "https://asurascans.com"
 enabled = true
-scraper_dir = "/path/to/mrm"  # repo root; Python scraper lives in ./scraper
 
 [notifications]
 enabled = true

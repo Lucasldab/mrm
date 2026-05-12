@@ -54,7 +54,93 @@ pub async fn open_db(path: &str) -> Result<SqlitePool> {
         "#,
     ).execute(&pool).await?;
 
+    // Cross-source series linking. One `manhwa` row (the canonical entry)
+    // can reference the same series on multiple scraper sources so we don't
+    // have to choose at add time. The coordinator polls every alias and
+    // surfaces whichever has the freshest chapter to the canonical row.
+    //
+    // (manhwa_id, source) is unique — a single source can only contribute
+    // one URL per series. Cascading delete keeps aliases tidy.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS manhwa_alias (
+            id           INTEGER PRIMARY KEY,
+            manhwa_id    INTEGER NOT NULL REFERENCES manhwa(id) ON DELETE CASCADE,
+            source       TEXT    NOT NULL,
+            source_url   TEXT    NOT NULL UNIQUE,
+            added_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (manhwa_id, source)
+        )
+        "#,
+    ).execute(&pool).await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_alias_by_manhwa \
+         ON manhwa_alias(manhwa_id)",
+    ).execute(&pool).await?;
+
     Ok(pool)
+}
+
+// ---------------------------------------------------------------------------
+// Alias queries — cross-source linking for a single canonical series.
+// (Schema is wired up; coordinator/UI integration lands in a follow-up.)
+// ---------------------------------------------------------------------------
+
+/// All (source, source_url) pairs for a given canonical manhwa, including the
+/// primary row's own (source, source_url) so callers can iterate uniformly.
+#[allow(dead_code)]
+pub async fn fetch_aliases(pool: &SqlitePool, manhwa_id: i64) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source, source_url FROM manhwa WHERE id = ?
+        UNION ALL
+        SELECT source, source_url FROM manhwa_alias WHERE manhwa_id = ?
+        "#,
+    )
+    .bind(manhwa_id)
+    .bind(manhwa_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter()
+        .map(|r| (r.get::<String, _>("source"), r.get::<String, _>("source_url")))
+        .collect())
+}
+
+/// Link an additional source to an existing manhwa. Idempotent — re-adding
+/// the same (manhwa_id, source) pair updates the URL via ON CONFLICT.
+#[allow(dead_code)]
+pub async fn add_alias(
+    pool: &SqlitePool,
+    manhwa_id: i64,
+    source: &str,
+    source_url: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO manhwa_alias (manhwa_id, source, source_url)
+        VALUES (?, ?, ?)
+        ON CONFLICT(manhwa_id, source) DO UPDATE SET
+            source_url = excluded.source_url
+        "#,
+    )
+    .bind(manhwa_id)
+    .bind(source)
+    .bind(source_url)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a single alias by id. The canonical manhwa row itself is never
+/// touched — use `delete_manhwa` for that.
+#[allow(dead_code)]
+pub async fn remove_alias(pool: &SqlitePool, alias_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM manhwa_alias WHERE id = ?")
+        .bind(alias_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
