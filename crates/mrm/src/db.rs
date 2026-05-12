@@ -276,21 +276,26 @@ pub async fn fetch_chapters(pool: &SqlitePool, manhwa_id: i64) -> Result<Vec<Cha
     .fetch_all(pool)
     .await?;
 
-    let chapters = rows
+    // Surface schema/type drift instead of silently substituting `id = 0`
+    // (which would collide with every other unparseable row and corrupt
+    // progress tracking).
+    let chapters: Result<Vec<Chapter>> = rows
         .iter()
-        .map(|row| Chapter {
-            id:          row.try_get("id").unwrap_or(0),
-            manhwa_id:   row.try_get("manhwa_id").unwrap_or(0),
-            number:      row.try_get("number").unwrap_or(0.0),
-            title:       row.try_get("title").unwrap_or(None),
-            url:         row.try_get("url").unwrap_or_default(),
-            released_at: row.try_get("released_at").unwrap_or(None),
-            scroll_pct:  row.try_get("scroll_pct").unwrap_or(0.0),
-            completed:   row.try_get::<i64, _>("completed").unwrap_or(0) != 0,
+        .map(|row| -> Result<Chapter> {
+            Ok(Chapter {
+                id:          row.try_get("id")?,
+                manhwa_id:   row.try_get("manhwa_id")?,
+                number:      row.try_get("number")?,
+                title:       row.try_get("title").unwrap_or(None),
+                url:         row.try_get("url")?,
+                released_at: row.try_get("released_at").unwrap_or(None),
+                scroll_pct:  row.try_get("scroll_pct").unwrap_or(0.0),
+                completed:   row.try_get::<i64, _>("completed").unwrap_or(0) != 0,
+            })
         })
         .collect();
 
-    Ok(chapters)
+    chapters
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +319,7 @@ pub async fn upsert_chapters(
         return Ok(0);
     }
 
+    let mut tx = pool.begin().await?;
     let mut new_count = 0usize;
 
     for ch in chapters {
@@ -323,7 +329,7 @@ pub async fn upsert_chapters(
         )
         .bind(manhwa_id)
         .bind(ch.number)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?
         .try_get::<bool, _>(0)
         .unwrap_or(false);
@@ -344,7 +350,7 @@ pub async fn upsert_chapters(
         .bind(&ch.title)
         .bind(&ch.url)
         .bind(&ch.released_at)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         if !already_exists {
@@ -352,6 +358,7 @@ pub async fn upsert_chapters(
         }
     }
 
+    tx.commit().await?;
     Ok(new_count)
 }
 
@@ -567,7 +574,19 @@ pub async fn upsert_discovery(
         return Ok(false);
     }
 
-    let res = sqlx::query(
+    // Decide "is this a brand-new discovery?" BEFORE the upsert. SQLite's
+    // `rows_affected` returns 1 for both INSERT and ON CONFLICT UPDATE paths,
+    // so we can't infer novelty from the response.
+    let already_known: bool = sqlx::query(
+        "SELECT EXISTS(SELECT 1 FROM discovered_manhwa WHERE source_url = ?)",
+    )
+    .bind(source_url)
+    .fetch_one(pool)
+    .await?
+    .try_get::<bool, _>(0)
+    .unwrap_or(false);
+
+    sqlx::query(
         r#"
         INSERT INTO discovered_manhwa
             (source, source_url, title, cover_url, chapter_number, released_at)
@@ -588,9 +607,7 @@ pub async fn upsert_discovery(
     .execute(pool)
     .await?;
 
-    // rows_affected() is 1 for INSERT, 2 for ON CONFLICT UPDATE on SQLite —
-    // only the insert path counts as a "new" discovery.
-    Ok(res.rows_affected() == 1)
+    Ok(!already_known)
 }
 
 /// Fetch all undismissed discoveries, newest first.
