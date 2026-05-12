@@ -180,8 +180,11 @@ async fn preload_covers_inner(
                 Err(_) => return,
             };
             let bytes = match client.get(&url).send().await {
-                Ok(resp) => match resp.bytes().await {
-                    Ok(b) => b,
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(ok) => match ok.bytes().await {
+                        Ok(b) => b,
+                        Err(_) => return,
+                    },
                     Err(_) => return,
                 },
                 Err(_) => return,
@@ -196,7 +199,12 @@ async fn preload_covers_inner(
                 return;
             }
             let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
-            let _ = resized.save(&path);
+            // Atomic write so partial downloads can never leave a corrupt file
+            // behind for the in-memory cache to load on next paint.
+            let tmp = path.with_extension("jpg.tmp");
+            if resized.save(&tmp).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         });
     }
 

@@ -34,6 +34,16 @@ impl AsuraScraper {
     /// Run the Python bridge script and return its stdout as a string.
     async fn run_bridge(&self, args: &[&str]) -> Result<String> {
         let python = self.python_path();
+        if !python.exists() {
+            return Err(anyhow!(
+                "Asura bridge unavailable: {} does not exist. \
+                 Create the venv (cd {} && python3 -m venv scraper/.venv && \
+                 scraper/.venv/bin/pip install -r scraper/requirements.txt) \
+                 or set asura.enabled=false in config.toml.",
+                python.display(),
+                self.scraper_dir.display(),
+            ));
+        }
         let mut cmd = tokio::process::Command::new(&python);
         cmd.arg("-m")
             .arg("scraper.asura_bridge")

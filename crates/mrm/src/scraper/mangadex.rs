@@ -326,7 +326,18 @@ impl MangaDexScraper {
         let limit: usize = 500;
         let client = &self.client;
 
+        // Safety cap. MangaDex tops out around ~2000 chapters even for the
+        // longest-running series; 50 pages × 500 limit = 25k chapters is a
+        // generous ceiling that prevents a malformed `total` field from
+        // looping forever (e.g. `total = u64::MAX, data = [one item]`).
+        const MAX_PAGES: usize = 50;
+        let mut pages = 0usize;
+
         loop {
+            pages += 1;
+            if pages > MAX_PAGES {
+                break;
+            }
             // Polite delay before each paginated request (250ms as per Python _DELAY)
             sleep(DELAY).await;
 
@@ -400,8 +411,13 @@ impl MangaDexScraper {
                 });
             }
 
+            // Guard against API responses that wedge the loop: if a page
+            // returned no items, we're done regardless of `total`.
+            if items.is_empty() {
+                break;
+            }
             offset += items.len();
-            if offset >= total || items.is_empty() {
+            if offset >= total {
                 break;
             }
         }

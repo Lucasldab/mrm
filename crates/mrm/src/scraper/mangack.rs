@@ -140,7 +140,9 @@ impl Scraper for MangackScraper {
                 .query(&[("s", query)])
                 .send()
                 .await
-                .with_context(|| format!("MangaCK GET {url}?s={query} failed"))?;
+                .with_context(|| format!("MangaCK GET {url}?s={query} failed"))?
+                .error_for_status()
+                .with_context(|| format!("MangaCK GET {url}?s={query} returned HTTP error"))?;
             r.text()
                 .await
                 .with_context(|| format!("MangaCK GET {url} body read failed"))
@@ -164,7 +166,9 @@ impl Scraper for MangackScraper {
                 .get(&url)
                 .send()
                 .await
-                .with_context(|| format!("MangaCK GET {url} failed"))?;
+                .with_context(|| format!("MangaCK GET {url} failed"))?
+                .error_for_status()
+                .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await
                 .with_context(|| format!("MangaCK GET {url} body read failed"))
@@ -192,7 +196,9 @@ impl Scraper for MangackScraper {
                 .get(&url)
                 .send()
                 .await
-                .with_context(|| format!("MangaCK GET {url} failed"))?;
+                .with_context(|| format!("MangaCK GET {url} failed"))?
+                .error_for_status()
+                .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await
                 .with_context(|| format!("MangaCK GET {url} body read failed"))
@@ -216,7 +222,9 @@ impl Scraper for MangackScraper {
                 .get(&url)
                 .send()
                 .await
-                .with_context(|| format!("MangaCK GET {url} failed"))?;
+                .with_context(|| format!("MangaCK GET {url} failed"))?
+                .error_for_status()
+                .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await
                 .with_context(|| format!("MangaCK GET {url} body read failed"))
