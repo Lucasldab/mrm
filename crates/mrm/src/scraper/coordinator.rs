@@ -92,10 +92,7 @@ fn build_registry(config: &Config, quiet: bool) -> HashMap<&'static str, Box<dyn
         match name.as_str() {
             "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
             "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
-            "asura"    => {
-                let dir = source_cfg.scraper_dir.as_deref().unwrap_or(".").into();
-                registry.insert("asura", Box::new(AsuraScraper::new(dir)));
-            }
+            "asura"    => { registry.insert("asura", Box::new(AsuraScraper::new())); }
             other => {
                 if !quiet {
                     eprintln!("mrm: unknown source '{other}' in config, skipping");

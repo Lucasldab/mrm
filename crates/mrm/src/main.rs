@@ -289,10 +289,7 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
         match name.as_str() {
             "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
             "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
-            "asura"    => {
-                let dir = source_cfg.scraper_dir.as_deref().unwrap_or(".").into();
-                registry.insert("asura", Box::new(AsuraScraper::new(dir)));
-            }
+            "asura"    => { registry.insert("asura", Box::new(AsuraScraper::new())); }
             _ => {}
         }
     }
