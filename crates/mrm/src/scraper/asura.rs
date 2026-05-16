@@ -104,9 +104,15 @@ pub struct AsuraScraper {
 
 impl AsuraScraper {
     pub fn new() -> Self {
+        // AsuraScans rotates the 8-hex slug suffix and 302's old → current.
+        // rquest (unlike reqwest) does NOT follow redirects by default, so
+        // without this every series URL returns the redirect stub: no <h1>,
+        // no chapter anchors, `final_url` stuck on the dead hash → 0 chapters
+        // parsed, silently reported "up to date". Must follow redirects.
         let client = rquest::Client::builder()
             .emulation(rquest_util::Emulation::Chrome131)
             .timeout(Duration::from_secs(20))
+            .redirect(rquest::redirect::Policy::limited(10))
             .build()
             .expect("rquest Client::build should never fail at startup");
         Self { client: Arc::new(client) }
