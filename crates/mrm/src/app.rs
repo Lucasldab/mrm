@@ -772,7 +772,18 @@ impl App {
         }
         let series = match result {
             Ok(s)  => s,
-            Err(e) => { self.set_msg(format!("Refresh failed: {e}")); return Ok(()); }
+            Err(e) => {
+                // A failed refresh is a failed poll for the health marker. The
+                // failure message wins over any error refreshing the views.
+                if db::record_poll_failure(&self.pool, manhwa_id, &e).await.is_ok() {
+                    if self.screen == (Screen::Detail { manhwa_id }) {
+                        let _ = self.refresh_detail(manhwa_id).await;
+                    }
+                    let _ = self.reload_manhwa().await;
+                }
+                self.set_msg(format!("Refresh failed: {e}"));
+                return Ok(());
+            }
         };
         // Fresh pub_status from the DB: a poll may have changed it meanwhile,
         // and the series may have been deleted.
@@ -816,7 +827,7 @@ impl App {
         let tx = self.app_tx.clone();
         tokio::spawn(async move {
             let result = match registry.get(source.as_str()) {
-                Some(scraper) => scraper.get_series(&source_url).await.map_err(|e| e.to_string()),
+                Some(scraper) => scraper.get_series(&source_url).await.map_err(|e| format!("{e:#}")),
                 None          => Err(source_unavailable(&source)),
             };
             let _ = tx.send(done(result));
@@ -2343,6 +2354,22 @@ mod task_tests {
             "SELECT COUNT(*) FROM chapter WHERE manhwa_id = $1 AND notified_at IS NULL",
         ).bind(id).fetch_one(&app.pool).await.unwrap();
         assert_eq!(unclaimed, 2, "refresh must leave new chapters for the notifying poller");
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_marks_the_series_failing() {
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", true)])).await else { return };
+        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, "https://x/rf"), "mangadex").await.unwrap();
+        app.open_detail(id).await.unwrap();
+
+        app.handle_event(key(KeyCode::Char('R'))).await.unwrap();
+        let ev = rx.recv().await.unwrap();
+        app.handle_event(ev).await.unwrap();
+
+        assert!(app.status_msg.as_deref().unwrap_or("").starts_with("Refresh failed"));
+        let m = app.current_manhwa.as_ref().unwrap();
+        assert_eq!(m.last_error.as_deref(), Some("down"));
+        assert!(m.failing_since.is_some(), "the detail view must see the failure");
     }
 
     #[tokio::test]

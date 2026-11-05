@@ -99,6 +99,8 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             m.status,
             m.status_override,
             m.description,
+            m.last_error,
+            m.failing_since::text AS failing_since,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -128,6 +130,8 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             status_override: row.try_get::<bool, _>("status_override")?,
             description:     row.try_get("description").unwrap_or(None),
             unread,
+            last_error:      row.try_get("last_error")?,
+            failing_since:   row.try_get("failing_since")?,
         });
     }
 
@@ -140,6 +144,7 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
         SELECT
             m.id, m.title, m.cover_url, m.source, m.source_url,
             m.pub_status, m.status, m.status_override, m.description,
+            m.last_error, m.failing_since::text AS failing_since,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -168,6 +173,8 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
         status_override: row.try_get::<bool, _>("status_override")?,
         description:     row.try_get("description").unwrap_or(None),
         unread,
+        last_error:      row.try_get("last_error")?,
+        failing_since:   row.try_get("failing_since")?,
     })
 }
 
@@ -392,8 +399,32 @@ pub async fn apply_poll_result(
     if inserted > 0 || pub_changed {
         recompute_status_conn(&mut tx, manhwa_id).await?;
     }
+    // The poll worked: clear any failure streak.
+    sqlx::query(
+        "UPDATE manhwa SET last_ok_at = now(), last_error = NULL, failing_since = NULL WHERE id = $1",
+    )
+    .bind(manhwa_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(inserted)
+}
+
+/// Longest stored poll error, in characters.
+const MAX_POLL_ERROR_CHARS: usize = 300;
+
+/// A poll of this series failed: keep the error (truncated) and the start
+/// of the failure streak, so Detail/Library can show "failing since".
+pub async fn record_poll_failure(pool: &PgPool, manhwa_id: i64, err: &str) -> Result<()> {
+    let err: String = err.chars().take(MAX_POLL_ERROR_CHARS).collect();
+    sqlx::query(
+        "UPDATE manhwa SET last_error = $1, failing_since = COALESCE(failing_since, now()) WHERE id = $2",
+    )
+    .bind(err)
+    .bind(manhwa_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Claim every chapter no notifying poller has announced yet, in one statement
@@ -1103,5 +1134,47 @@ pub(crate) mod tests {
 
         // Other sources still compare exact URLs.
         assert!(upsert_discovery(&pool, "mangack", "https://m/manga/solo-leveling-1a2b3c4d/", "SL", None, None, None).await.unwrap());
+    }
+
+    // --- M9: per-series poll health ---
+
+    #[tokio::test]
+    async fn poll_failure_is_recorded_and_cleared_by_the_next_success() {
+        let pool = pool_or_skip!();
+        let s = series(1, "https://x/h");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangack").await.unwrap();
+        let m = fetch_manhwa(&pool, id).await.unwrap();
+        assert_eq!((m.last_error, m.failing_since), (None, None));
+
+        record_poll_failure(&pool, id, "HTTP 404").await.unwrap();
+        let m = fetch_manhwa(&pool, id).await.unwrap();
+        assert_eq!(m.last_error.as_deref(), Some("HTTP 404"));
+        let since = m.failing_since.clone().expect("failing_since set");
+        assert!(since.starts_with("20"), "timestamp text: {since}");
+
+        // A later failure updates the error but keeps the first failure time.
+        sqlx::query("UPDATE manhwa SET failing_since = '2026-01-02 03:04:05+00' WHERE id = $1")
+            .bind(id).execute(&pool).await.unwrap();
+        record_poll_failure(&pool, id, "HTTP 503").await.unwrap();
+        let all = fetch_all_manhwa(&pool).await.unwrap();
+        assert_eq!(all[0].last_error.as_deref(), Some("HTTP 503"));
+        assert!(all[0].failing_since.as_deref().unwrap().starts_with("2026-01-02"));
+
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        let m = fetch_manhwa(&pool, id).await.unwrap();
+        assert_eq!((m.last_error, m.failing_since), (None, None));
+        let ok: bool = sqlx::query_scalar("SELECT last_ok_at IS NOT NULL FROM manhwa WHERE id = $1")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert!(ok, "success stamps last_ok_at");
+    }
+
+    #[tokio::test]
+    async fn poll_failure_text_is_truncated_on_a_char_boundary() {
+        let pool = pool_or_skip!();
+        let id = insert_manhwa_with_chapters(&pool, &series(1, "https://x/u"), "mangack").await.unwrap();
+        let long = "한".repeat(400);
+        record_poll_failure(&pool, id, &long).await.unwrap();
+        let e = fetch_manhwa(&pool, id).await.unwrap().last_error.unwrap();
+        assert_eq!(e.chars().count(), 300);
     }
 }

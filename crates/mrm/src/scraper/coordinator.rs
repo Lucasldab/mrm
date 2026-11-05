@@ -109,6 +109,30 @@ pub async fn stop_coordinator(
 // Poll cycle
 // ---------------------------------------------------------------------------
 
+/// Consecutive `get_series` failures from one source after which the rest of
+/// that source's series are skipped for this poll (it is down or blocking us;
+/// the next poll tries again).
+pub(crate) const SOURCE_FAILURE_LIMIT: usize = 3;
+
+/// Per-source consecutive-failure counts within one poll.
+#[derive(Debug, Default)]
+pub(crate) struct SourceStreaks(std::collections::HashMap<String, usize>);
+
+impl SourceStreaks {
+    pub(crate) fn failed(&mut self, source: &str) {
+        *self.0.entry(source.to_string()).or_default() += 1;
+    }
+
+    pub(crate) fn succeeded(&mut self, source: &str) {
+        self.0.remove(source);
+    }
+
+    /// True once `source` has failed `SOURCE_FAILURE_LIMIT` times in a row.
+    pub(crate) fn skip(&self, source: &str) -> bool {
+        self.0.get(source).is_some_and(|&n| n >= SOURCE_FAILURE_LIMIT)
+    }
+}
+
 async fn poll_all(
     pool: &PgPool,
     config: &Config,
@@ -127,6 +151,9 @@ async fn poll_all(
     log!("mrm: checking {} manhwa", manhwa_list.len());
 
     let mut updated_titles: Vec<String> = Vec::new();
+    let mut streaks = SourceStreaks::default();
+    // A ⚠ marker appeared or cleared: the TUI should reload its list.
+    let mut health_changed = false;
 
     for manhwa in &manhwa_list {
         let scraper = match registry.get(manhwa.source.as_str()) {
@@ -137,6 +164,11 @@ async fn poll_all(
                 continue;
             }
         };
+        if streaks.skip(&manhwa.source) {
+            log!("mrm: skipping '{}': {} failed {SOURCE_FAILURE_LIMIT} times in a row this poll",
+                 manhwa.title, manhwa.source);
+            continue;
+        }
 
         // Fetch latest series data (scraper has built-in retry). Shutdown
         // wins over a slow source.
@@ -151,10 +183,16 @@ async fn poll_all(
         let series = match fetched {
             Ok(s) => s,
             Err(e) => {
-                log!("mrm: failed to fetch '{}': {e}", manhwa.title);
+                log!("mrm: failed to fetch '{}': {e:#}", manhwa.title);
+                streaks.failed(&manhwa.source);
+                match db::record_poll_failure(pool, manhwa.id, &format!("{e:#}")).await {
+                    Ok(()) => health_changed = true,
+                    Err(db_err) => log!("mrm: could not record failure for '{}': {db_err}", manhwa.title),
+                }
                 continue;
             }
         };
+        streaks.succeeded(&manhwa.source);
 
         let new_count = match db::apply_poll_result(pool, manhwa.id, &series, &manhwa.pub_status).await {
             Ok(n) => n,
@@ -163,6 +201,7 @@ async fn poll_all(
                 continue;
             }
         };
+        health_changed |= manhwa.failing_since.is_some();
         if new_count > 0 {
             log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
             updated_titles.push(manhwa.title.clone());
@@ -189,8 +228,9 @@ async fn poll_all(
             Err(e) => log!("mrm: claim error: {e}"),
         }
     }
-    if !updated_titles.is_empty() {
-        // Signal TUI to refresh library list; ignore send error (TUI may be exiting)
+    if !updated_titles.is_empty() || health_changed {
+        // Signal TUI to refresh library list (empty titles = reload without a
+        // banner); ignore send error (TUI may be exiting)
         let _ = scraper_tx.send(ScraperEvent::NewChapters { titles: updated_titles }).await;
     }
 
@@ -351,6 +391,62 @@ mod tests {
             .await
             .expect("coordinator kept polling after shutdown")
             .unwrap();
+    }
+
+    /// A source whose `get_series` always fails, counting calls.
+    struct FailingScraper(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Scraper for FailingScraper {
+        fn source_name(&self) -> &'static str { "dead" }
+        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> { Ok(vec![]) }
+        async fn get_series(&self, _url: &str) -> Result<SeriesData> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("HTTP 403"))
+        }
+        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> { Ok(vec![]) }
+    }
+
+    #[test]
+    fn a_source_is_benched_after_three_consecutive_failures() {
+        let mut streaks = SourceStreaks::default();
+        for _ in 0..2 { streaks.failed("a"); }
+        assert!(!streaks.skip("a"));
+        streaks.succeeded("a");
+        for _ in 0..2 { streaks.failed("a"); }
+        assert!(!streaks.skip("a"), "a success resets the streak");
+        streaks.failed("a");
+        assert!(streaks.skip("a"));
+        assert!(!streaks.skip("b"), "other sources are unaffected");
+    }
+
+    #[tokio::test]
+    async fn poll_records_failures_and_skips_a_dead_source() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
+            return;
+        };
+        for i in 0..5 {
+            db::insert_manhwa_with_chapters(&pool, &series(1, &format!("https://x/dead{i}")), "dead").await.unwrap();
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut reg: Registry = Registry::new();
+        reg.insert("dead", Box::new(FailingScraper(calls.clone())));
+        // Discovery is not due: keep this test to the chapter poll.
+        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339()).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(4);
+        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), SOURCE_FAILURE_LIMIT);
+        match rx.try_recv() {
+            Ok(ScraperEvent::NewChapters { titles }) => assert!(titles.is_empty()),
+            other => panic!("TUI was not told to reload for the ⚠ markers: {other:?}"),
+        }
+        let failing: Vec<_> = db::fetch_all_manhwa(&pool).await.unwrap()
+            .into_iter().filter(|m| m.failing_since.is_some()).collect();
+        assert_eq!(failing.len(), SOURCE_FAILURE_LIMIT, "skipped series are not marked failing");
+        assert!(failing.iter().all(|m| m.last_error.as_deref() == Some("HTTP 403")));
     }
 
     #[tokio::test]

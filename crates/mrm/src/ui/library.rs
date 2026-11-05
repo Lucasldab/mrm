@@ -25,6 +25,8 @@ struct CellData {
     status: crate::types::Status,
     unread: u32,
     status_display: String,
+    /// Polls of this series are failing (shown as a ⚠ marker).
+    failing: bool,
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -36,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         status: m.status.clone(),
         unread: m.unread,
         status_display: m.status_display(),
+        failing: m.failing_since.is_some(),
     }).collect();
 
     // Split: main grid | right sidebar (keybinds)
@@ -155,8 +158,8 @@ fn draw_grid(f: &mut Frame, app: &mut App, cells: &[CellData], area: Rect) {
 }
 
 fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selected: bool) {
-    let CellData { id: manhwa_id, title, cover_url, status, unread, status_display } = cell;
-    let (manhwa_id, unread) = (*manhwa_id, *unread);
+    let CellData { id: manhwa_id, title, cover_url, status, unread, status_display, failing } = cell;
+    let (manhwa_id, unread, failing) = (*manhwa_id, *unread, *failing);
 
     if area.width < 4 || area.height < 4 {
         return;
@@ -197,7 +200,7 @@ fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selec
     render_cover(f, app, img_area, manhwa_id, cover_url.as_deref());
     render_title_text(f, txt_area, title, is_selected, &app.theme);
     if sts_area.width > 0 {
-        render_status_line(f, sts_area, status, unread, status_display, &app.theme);
+        render_status_line(f, sts_area, status, unread, status_display, failing, &app.theme);
     }
 }
 
@@ -247,20 +250,39 @@ fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool, the
     f.render_widget(para, area);
 }
 
-fn render_status_line(f: &mut Frame, area: Rect, status: &crate::types::Status, unread: u32, status_display: &str, theme: &crate::config::ThemeConfig) {
-    let status_color = theme.status_color(status);
-
-    let text = if unread > 0 {
+/// Status line text: unread badge, status, and a leading ⚠ while the
+/// series' polls are failing.
+fn status_text(unread: u32, status_display: &str, failing: bool) -> String {
+    let base = if unread > 0 {
         format!("[{}] {}", unread, status_display)
     } else {
         status_display.to_string()
     };
+    if failing { format!("⚠ {base}") } else { base }
+}
 
-    let text = truncate_str(&text, area.width as usize);
+fn render_status_line(
+    f: &mut Frame,
+    area: Rect,
+    status: &crate::types::Status,
+    unread: u32,
+    status_display: &str,
+    failing: bool,
+    theme: &crate::config::ThemeConfig,
+) {
+    let status_color = theme.status_color(status);
+    let text = truncate_str(&status_text(unread, status_display, failing), area.width as usize);
 
-    let para = Paragraph::new(text)
-        .style(Style::default().fg(status_color))
-        .alignment(Alignment::Center);
+    // The marker in the warning colour, the rest in the status colour.
+    let line = match text.strip_prefix("⚠ ") {
+        Some(rest) if failing => Line::from(vec![
+            Span::styled("⚠ ", Style::default().fg(theme.error())),
+            Span::styled(rest.to_string(), Style::default().fg(status_color)),
+        ]),
+        _ => Line::from(Span::styled(text, Style::default().fg(status_color))),
+    };
+
+    let para = Paragraph::new(line).alignment(Alignment::Center);
     f.render_widget(para, area);
 }
 
@@ -403,4 +425,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failing_series_get_a_warning_marker() {
+        assert_eq!(status_text(0, "Reading", false), "Reading");
+        assert_eq!(status_text(2, "2 new", false), "[2] 2 new");
+        assert_eq!(status_text(0, "Reading", true), "⚠ Reading");
+        assert_eq!(status_text(2, "2 new", true), "⚠ [2] 2 new");
+    }
 }

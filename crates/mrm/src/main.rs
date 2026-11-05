@@ -163,19 +163,29 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     let manhwa_list = db::fetch_all_manhwa(&pool).await?;
     eprintln!("mrm: checking {} manhwa", manhwa_list.len());
 
+    let mut streaks = scraper::coordinator::SourceStreaks::default();
     for manhwa in &manhwa_list {
         let scraper = match registry.get(manhwa.source.as_str()) {
             Some(s) => s,
             None => continue,
         };
+        if streaks.skip(&manhwa.source) {
+            eprintln!("  - {}: skipped, {} keeps failing", manhwa.title, manhwa.source);
+            continue;
+        }
 
         let series = match scraper.get_series(&manhwa.source_url).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("  ✗ {}: {e}", manhwa.title);
+                eprintln!("  ✗ {}: {e:#}", manhwa.title);
+                streaks.failed(&manhwa.source);
+                if let Err(db_err) = db::record_poll_failure(&pool, manhwa.id, &format!("{e:#}")).await {
+                    eprintln!("    (could not record the failure: {db_err})");
+                }
                 continue;
             }
         };
+        streaks.succeeded(&manhwa.source);
 
         let new_count = match db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await {
             Ok(n) => n,

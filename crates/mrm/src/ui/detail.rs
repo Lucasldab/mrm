@@ -22,11 +22,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     // series simply have no synopsis and we hide the block entirely so the
     // chapter list keeps the full screen.
     let desc_height: u16 = if has_desc { 7 } else { 0 };
+    let failing = manhwa.failing_since.is_some();
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Length(if failing { 7 } else { 6 }),
             Constraint::Length(desc_height),
             Constraint::Min(0),
             Constraint::Length(1),
@@ -50,7 +51,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let read_count = app.chapter_list.iter().filter(|c| c.completed).count();
     let total      = app.chapter_list.len();
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format!(" {}", manhwa.title),
             Style::default()
@@ -86,6 +87,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             },
         ]),
     ];
+    if let Some(health) = health_line(manhwa.failing_since.as_deref(), manhwa.last_error.as_deref()) {
+        lines.push(Line::from(Span::styled(format!("  {health}"), Style::default().fg(theme.error()))));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -94,6 +98,16 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
+}
+
+/// "⚠ failing since <date>: <error>" while polls of the series fail.
+/// `failing_since` is Postgres timestamptz text; its first 10 bytes are the
+/// date (`get` keeps an unexpected value from panicking the draw).
+pub(crate) fn health_line(failing_since: Option<&str>, last_error: Option<&str>) -> Option<String> {
+    let since = failing_since?;
+    let date = since.get(..10).unwrap_or(since);
+    let err = last_error.unwrap_or("unknown error");
+    Some(format!("⚠ failing since {date}: {err}"))
 }
 
 fn draw_description(f: &mut Frame, app: &App, area: Rect) {
@@ -204,4 +218,23 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(app.theme.bar_fg()).bg(app.theme.bar_bg()),
     );
     f.render_widget(bar, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_line_shows_date_and_error_only_while_failing() {
+        assert_eq!(health_line(None, None), None);
+        assert_eq!(
+            health_line(Some("2026-11-05 10:11:12.5+00"), Some("HTTP 404")),
+            Some("⚠ failing since 2026-11-05: HTTP 404".to_string()),
+        );
+        // Short or odd timestamp text is shown as is, never sliced mid-char.
+        assert_eq!(
+            health_line(Some("한국"), None),
+            Some("⚠ failing since 한국: unknown error".to_string()),
+        );
+    }
 }
