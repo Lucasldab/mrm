@@ -136,6 +136,14 @@ pub struct App {
     pub viewer_socket:       Option<String>,
     pub viewer_loaded_count: usize,
     pub viewer_drop_warned:  bool,
+    /// imv config dir (private tempdir), alive for the viewer session.
+    pub imv_config_dir:      Option<TempDir>,
+    /// rv's socket path, delivered by its stdout-draining thread.
+    rv_socket_rx:            Option<std::sync::mpsc::Receiver<String>>,
+    /// Queue to the worker that runs imv-msg/rv-msg off the UI task.
+    viewer_send_tx:          Option<mpsc::UnboundedSender<Vec<String>>>,
+    /// Failures reported by that worker.
+    viewer_send_err_rx:      Option<mpsc::UnboundedReceiver<String>>,
     pub(crate) host_fullscreen: Option<HostFullscreen>,
     pub session_dir:     Option<TempDir>,
     pub error_rx:        Option<mpsc::Receiver<String>>,
@@ -233,6 +241,10 @@ impl App {
             viewer_socket:       None,
             viewer_loaded_count: 0,
             viewer_drop_warned:  false,
+            imv_config_dir:      None,
+            rv_socket_rx:        None,
+            viewer_send_tx:      None,
+            viewer_send_err_rx:  None,
             host_fullscreen:     None,
             session_dir:      None,
             error_rx:         None,
@@ -1058,6 +1070,9 @@ impl App {
                 self.viewer_process  = None;
                 self.viewer_pid      = None;
                 self.viewer_socket   = None;
+                self.rv_socket_rx    = None;
+                self.viewer_send_tx  = None;
+                self.imv_config_dir  = None;
                 self.images_loading  = false;
                 self.image_rx        = None;
                 self.error_rx        = None;
@@ -1070,7 +1085,50 @@ impl App {
             }
         }
 
-        if !self.images_loading { return; }
+        // Failures from the imv-msg/rv-msg worker.
+        let mut send_errs = Vec::new();
+        if let Some(rx) = &mut self.viewer_send_err_rx {
+            while let Ok(m) = rx.try_recv() { send_errs.push(m); }
+        }
+        if let Some(m) = send_errs.into_iter().next() {
+            if !self.viewer_drop_warned {
+                self.viewer_drop_warned = true;
+                self.set_msg(m);
+            }
+        }
+
+        // Keep ticking after loading ends while pages still wait for the
+        // viewer (e.g. rv's socket path not known yet).
+        if self.viewer_exited { return; }
+        if !self.images_loading
+            && (self.viewer_launch_failed || self.viewer_loaded_count >= self.image_paths.len())
+        {
+            return;
+        }
+
+        // rv socket path, if the reader thread has produced it. Never blocks.
+        if self.viewer_socket.is_none() {
+            let mut gone = false;
+            if let Some(rx) = &self.rv_socket_rx {
+                match rx.try_recv() {
+                    Ok(path) if !path.is_empty() => {
+                        self.viewer_socket = Some(path);
+                        gone = true;
+                    }
+                    Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        gone = true;
+                        if !self.viewer_drop_warned {
+                            self.viewer_drop_warned = true;
+                            self.set_msg("rv gave no socket path; later pages not streamed");
+                        }
+                        // Treat everything as sent so the tick can go idle.
+                        self.viewer_loaded_count = usize::MAX;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if gone { self.rv_socket_rx = None; }
+        }
 
         // Drain error channel — route errors to TUI status bar
         if let Some(err_rx) = &mut self.error_rx {
@@ -1120,13 +1178,19 @@ impl App {
                 self.viewer_launch_failed = true;
             }
         } else if had_viewer {
-            // Feed new images to running viewer
+            // Feed new images to the running viewer, one batch per tick.
+            // rv pages wait (stay queued) until its socket path is known.
+            let ready = match self.viewer_kind {
+                crate::config::ViewerKind::Imv => self.viewer_pid.is_some(),
+                crate::config::ViewerKind::Rv  => self.viewer_socket.is_some(),
+            };
             let total = self.image_paths.len();
-            for i in self.viewer_loaded_count..total {
-                let p = self.image_paths[i].to_string_lossy().into_owned();
-                self.send_viewer_open(&p);
+            if ready && self.viewer_loaded_count < total {
+                let batch: Vec<String> = self.image_paths[self.viewer_loaded_count..total]
+                    .iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                self.viewer_loaded_count = total;
+                self.send_viewer_open(batch);
             }
-            self.viewer_loaded_count = total;
         }
 
         if done {
@@ -1150,12 +1214,19 @@ impl App {
 
     fn launch_imv(&mut self) {
         // Write a temporary imv config to a fake XDG_CONFIG_HOME so imv picks
-        // it up instead of the user's global config.
-        // PID-scoped path so concurrent mrm instances don't stomp on each other's config.
-        let tmp_xdg = std::env::temp_dir().join(format!("mrm_imv_xdg_{}", std::process::id()));
-        let tmp_imv_dir = tmp_xdg.join("imv");
-        let _ = std::fs::create_dir_all(&tmp_imv_dir);
-        let _ = std::fs::write(tmp_imv_dir.join("config"), self.imv_config.to_config_string());
+        // it up instead of the user's global config. The directory is a
+        // private (0700) tempdir held for the viewer session.
+        let cfg_dir = match tempfile::Builder::new().prefix("mrm_imv_").tempdir() {
+            Ok(d) => d,
+            Err(e) => { self.set_msg(format!("imv config dir: {e}")); return; }
+        };
+        let imv_dir = cfg_dir.path().join("imv");
+        if let Err(e) = std::fs::create_dir(&imv_dir)
+            .and_then(|_| std::fs::write(imv_dir.join("config"), self.imv_config.to_config_string()))
+        {
+            self.set_msg(format!("imv config: {e}"));
+            return;
+        }
 
         let mut args: Vec<String> = Vec::new();
         for path in &self.image_paths {
@@ -1166,10 +1237,10 @@ impl App {
             self.set_msg(format!("{bin} not found in PATH"));
             return;
         }
-        let log = std::fs::File::create("/tmp/mrm-imv.log").ok();
+        let log = open_viewer_log("imv.log");
         let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
         match std::process::Command::new(bin)
-            .env("XDG_CONFIG_HOME", &tmp_xdg)
+            .env("XDG_CONFIG_HOME", cfg_dir.path())
             .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(stderr)
@@ -1177,9 +1248,11 @@ impl App {
         {
             Ok(child) => {
                 let pid = child.id();
+                self.imv_config_dir      = Some(cfg_dir);
                 self.viewer_pid          = Some(pid);
                 self.viewer_loaded_count = self.image_paths.len();
                 self.viewer_process      = Some(ManagedChild(child));
+                self.start_send_worker(pid.to_string());
             }
             Err(e) => self.set_msg(format!("{bin} error: {e}")),
         }
@@ -1195,7 +1268,7 @@ impl App {
             self.set_msg(format!("{bin} not found in PATH"));
             return;
         }
-        let log = std::fs::File::create("/tmp/mrm-rv.log").ok();
+        let log = open_viewer_log("rv.log");
         let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
         match std::process::Command::new(&bin)
             .args(&args)
@@ -1204,28 +1277,26 @@ impl App {
             .spawn()
         {
             Ok(mut child) => {
-                // rv prints the socket path to stdout on startup.
-                // Read with timeout on a worker thread so a silent rv can't hang the TUI.
-                let stdout = child.stdout.take();
-                let socket_path = stdout.and_then(|s| {
+                // rv prints the socket path as its first stdout line. A helper
+                // thread sends it over a channel that poll_images checks
+                // without blocking, then keeps draining stdout so later
+                // writes by rv never hit a closed pipe.
+                if let Some(stdout) = child.stdout.take() {
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
                         use std::io::BufRead;
-                        let mut reader = std::io::BufReader::new(s);
-                        let mut line = String::new();
-                        let _ = reader.read_line(&mut line);
-                        let _ = tx.send(line.trim().to_string());
+                        let mut lines = std::io::BufReader::new(stdout).lines();
+                        if let Some(Ok(first)) = lines.next() {
+                            let _ = tx.send(first.trim().to_string());
+                        }
+                        drop(tx);
+                        for _ in lines {}
                     });
-                    rx.recv_timeout(std::time::Duration::from_secs(3))
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                });
-                if socket_path.is_none() {
-                    self.set_msg(format!("{bin}: no socket path (see /tmp/mrm-rv.log)"));
+                    self.rv_socket_rx = Some(rx);
                 }
                 let pid = child.id();
                 self.viewer_pid          = Some(pid);
-                self.viewer_socket       = socket_path;
+                self.viewer_socket       = None;
                 self.viewer_loaded_count = self.image_paths.len();
                 self.viewer_process      = Some(ManagedChild(child));
             }
@@ -1233,31 +1304,48 @@ impl App {
         }
     }
 
-    fn send_viewer_open(&mut self, path: &str) {
+    /// Spawn the worker that runs `imv-msg`/`rv-msg` for this viewer session.
+    /// `target` is imv's pid or rv's socket path. Batches arrive over a
+    /// channel and run sequentially (keeping page order) off the UI task.
+    fn start_send_worker(&mut self, target: String) {
         use crate::config::ViewerKind;
-        match self.viewer_kind {
-            ViewerKind::Imv => {
-                if let Some(pid) = self.viewer_pid {
-                    let _ = std::process::Command::new("imv-msg")
-                        .args([&pid.to_string(), "open", path])
-                        .status();
-                }
-            }
-            ViewerKind::Rv => {
-                if let Some(sock) = &self.viewer_socket {
-                    let status = std::process::Command::new("rv-msg")
-                        .args([sock, "open", path])
-                        .status();
-                    let failed = !matches!(status, Ok(s) if s.success());
-                    if failed && !self.viewer_drop_warned {
-                        self.viewer_drop_warned = true;
-                        self.set_msg("rv-msg failed; later pages not streamed");
+        let prog = match self.viewer_kind {
+            ViewerKind::Imv => "imv-msg",
+            ViewerKind::Rv  => "rv-msg",
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
+        let (err_tx, err_rx) = mpsc::unbounded_channel::<String>();
+        self.viewer_send_tx     = Some(tx);
+        self.viewer_send_err_rx = Some(err_rx);
+        tokio::spawn(async move {
+            while let Some(batch) = rx.recv().await {
+                for path in batch {
+                    let status = tokio::process::Command::new(prog)
+                        .args([target.as_str(), "open", path.as_str()])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .status()
+                        .await;
+                    if !matches!(status, Ok(s) if s.success()) {
+                        let _ = err_tx.send(format!("{prog} failed; later pages may not stream"));
                     }
-                } else if !self.viewer_drop_warned {
-                    self.viewer_drop_warned = true;
-                    self.set_msg("rv socket unknown; later pages not streamed");
                 }
             }
+        });
+    }
+
+    fn send_viewer_open(&mut self, batch: Vec<String>) {
+        use crate::config::ViewerKind;
+        if self.viewer_send_tx.is_none() {
+            // rv: the worker starts once the socket path is known.
+            if let (ViewerKind::Rv, Some(sock)) = (self.viewer_kind, self.viewer_socket.clone()) {
+                self.start_send_worker(sock);
+            }
+        }
+        if let Some(tx) = &self.viewer_send_tx {
+            let _ = tx.send(batch);
         }
     }
 
@@ -1273,6 +1361,10 @@ impl App {
         self.viewer_process       = None;  // Drop kills viewer
         self.viewer_pid           = None;
         self.viewer_socket        = None;
+        self.rv_socket_rx         = None;
+        self.viewer_send_tx       = None;
+        self.viewer_send_err_rx   = None;
+        self.imv_config_dir       = None;  // Drop deletes the private config dir
         self.viewer_loaded_count  = 0;
         self.viewer_drop_warned   = false;
         self.viewer_launch_failed = false;
@@ -1530,17 +1622,16 @@ async fn fetch_chapter_images(
     // AsuraScans' CDN rejects non-browser requests and hotlinked fetches.
     // Send a realistic Chrome UA plus a Referer so the CDN treats us like
     // an in-page image request.
-    let referer: Option<&'static str> = if source == "asura" {
-        client_builder = client_builder.user_agent(
+    // Every source gets the chapter URL as Referer (many CDNs hotlink-check).
+    client_builder = if source == "asura" {
+        client_builder.user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        );
-        Some("https://asurascans.com/")
+        )
     } else {
-        client_builder = client_builder
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
-        None
+        client_builder.user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
     };
+    let referer: Arc<str> = Arc::from(chapter_url);
 
     let client = Arc::new(client_builder.build().expect("reqwest client"));
     let sem = Arc::new(Semaphore::new(4));
@@ -1555,18 +1646,18 @@ async fn fetch_chapter_images(
         let client      = client.clone();
         let sem         = sem.clone();
         let session_dir = session_dir.clone();
+        let referer     = referer.clone();
         let handle = set.spawn(async move {
             let result = async {
                 let _permit = sem.acquire_owned().await.ok()?;
-                let mut req = client.get(&url);
-                if let Some(r) = referer {
-                    req = req.header(reqwest::header::REFERER, r);
-                }
-                let bytes = req.send().await.ok()?.bytes().await.ok()?;
-                let img   = image::load_from_memory(&bytes).ok()?;
-                let path  = session_dir.join(format!("page_{page}.png"));
-                img.save(&path).ok()?;
-                Some(path)
+                let resp = client.get(&url)
+                    .header(reqwest::header::REFERER, &*referer)
+                    .send().await.ok()?
+                    .error_for_status().ok()?;
+                let bytes = resp.bytes().await.ok()?;
+                // Validation, file write and any fallback decode are blocking work.
+                tokio::task::spawn_blocking(move || save_page(&bytes, &session_dir, page))
+                    .await.ok()?
             }.await;
             (page, result)
         });
@@ -1595,6 +1686,64 @@ async fn fetch_chapter_images(
     }
 
     let _ = tx.send(None).await;
+}
+
+/// File extension for a downloaded page, from its magic bytes. Only formats
+/// both viewers (imv, rv/SDL2_image) can open are accepted; anything else
+/// (HTML error pages, unknown data) is an error.
+fn page_extension(bytes: &[u8]) -> Result<&'static str> {
+    use image::ImageFormat;
+    match image::guess_format(bytes)? {
+        ImageFormat::Jpeg => Ok("jpg"),
+        ImageFormat::Png  => Ok("png"),
+        ImageFormat::WebP => Ok("webp"),
+        ImageFormat::Gif  => Ok("gif"),
+        ImageFormat::Avif => Ok("avif"),
+        other => Err(anyhow::anyhow!("unsupported page format {other:?}")),
+    }
+}
+
+/// Write a page to `dir`. Original bytes are kept (no re-encode) when the
+/// viewers can read the format; otherwise fall back to decoding to PNG.
+/// Blocking: call from `spawn_blocking`.
+fn save_page(bytes: &[u8], dir: &std::path::Path, page: usize) -> Option<std::path::PathBuf> {
+    match page_extension(bytes) {
+        Ok(ext) => {
+            let path = dir.join(format!("page_{page}.{ext}"));
+            std::fs::write(&path, bytes).ok()?;
+            Some(path)
+        }
+        Err(_) => {
+            let img = image::load_from_memory(bytes).ok()?;
+            let path = dir.join(format!("page_{page}.png"));
+            img.save(&path).ok()?;
+            Some(path)
+        }
+    }
+}
+
+/// Directory for viewer logs: `$XDG_STATE_HOME/mrm`, else
+/// `~/.local/state/mrm`. Empty or relative XDG values are ignored.
+fn viewer_log_dir(xdg_state: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    match xdg_state.filter(|s| s.starts_with('/')) {
+        Some(x) => Some(PathBuf::from(x).join("mrm")),
+        None => home.filter(|h| !h.is_empty())
+            .map(|h| PathBuf::from(h).join(".local/state/mrm")),
+    }
+}
+
+/// Create the viewer log (0700 dir, 0600 file) and return it, or None.
+fn open_viewer_log(name: &str) -> Option<std::fs::File> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = viewer_log_dir(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(true).mode(0o600)
+        .open(dir.join(name)).ok()
 }
 
 /// How long a status-bar message stays visible.
@@ -1702,5 +1851,55 @@ mod join_tests {
         assert_eq!(got.len(), 2);
         assert!(got[0].1.is_some());
         assert_eq!(got[1], (1, None));
+    }
+}
+
+#[cfg(test)]
+mod page_ext_tests {
+    use super::{page_extension, viewer_log_dir};
+    use std::path::PathBuf;
+
+    #[test]
+    fn detects_formats_by_magic_bytes() {
+        assert_eq!(page_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F']).unwrap(), "jpg");
+        assert_eq!(page_extension(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap(), "png");
+        assert_eq!(page_extension(b"RIFF\x24\0\0\0WEBPVP8 ").unwrap(), "webp");
+        assert_eq!(page_extension(b"GIF89a\x01\0\x01\0").unwrap(), "gif");
+    }
+
+    #[test]
+    fn unknown_or_html_is_an_error() {
+        assert!(page_extension(b"<html><body>403</body></html>").is_err());
+        assert!(page_extension(b"").is_err());
+    }
+
+    #[test]
+    fn log_dir_prefers_xdg_state_home() {
+        assert_eq!(
+            viewer_log_dir(Some("/x/state"), Some("/home/u")),
+            Some(PathBuf::from("/x/state/mrm")),
+        );
+    }
+
+    #[test]
+    fn log_dir_falls_back_to_home_local_state() {
+        assert_eq!(
+            viewer_log_dir(None, Some("/home/u")),
+            Some(PathBuf::from("/home/u/.local/state/mrm")),
+        );
+        // Empty and relative XDG values are ignored per the XDG spec.
+        assert_eq!(
+            viewer_log_dir(Some(""), Some("/home/u")),
+            Some(PathBuf::from("/home/u/.local/state/mrm")),
+        );
+        assert_eq!(
+            viewer_log_dir(Some("rel/path"), Some("/home/u")),
+            Some(PathBuf::from("/home/u/.local/state/mrm")),
+        );
+    }
+
+    #[test]
+    fn log_dir_none_without_any_base() {
+        assert_eq!(viewer_log_dir(None, None), None);
     }
 }
