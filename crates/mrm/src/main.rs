@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use crossterm::{
     event::{Event, EventStream, KeyEventKind},
     execute,
+    cursor::Show,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
     match mode {
         Mode::Daemon => run_daemon(pool, config).await,
         Mode::Once   => run_once(pool, config).await,
-        Mode::Tui    => run_tui(pool, Some(config)).await,
+        Mode::Tui    => run_tui(pool, config).await,
     }
 }
 
@@ -250,19 +251,47 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
 // TUI mode (default)
 // ---------------------------------------------------------------------------
 
-async fn run_tui(pool: sqlx::PgPool, config_opt: Option<config::Config>) -> Result<()> {
+/// Put the terminal back into cooked mode on the main screen with a visible
+/// cursor. Idempotent and infallible: safe to call from a panic hook, a
+/// `Drop`, or twice in a row.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+}
+
+/// Restores the terminal when dropped, so early returns (`?`) and unwinding
+/// panics never strand the shell in raw mode on the alternate screen.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Install a panic hook that restores the terminal first (so the message is
+/// readable on the main screen) and then runs the previously installed hook.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        previous(info);
+    }));
+}
+
+async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     startup_cleanup_tmp();
 
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
     let shutdown = CancellationToken::new();
 
-    let config_for_app = config_opt.clone().expect("config.toml required");
-    let coordinator_handle = config_opt.map(|cfg| {
+    let coordinator_handle = {
         let pool_c     = pool.clone();
+        let cfg        = config.clone();
         let shutdown_c = shutdown.clone();
         let tx_c       = scraper_tx.clone();
         tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c, true))
-    });
+    };
 
     let picker = {
         let p = ratatui_image::picker::Picker::from_query_stdio()
@@ -272,7 +301,7 @@ async fn run_tui(pool: sqlx::PgPool, config_opt: Option<config::Config>) -> Resu
         Some(p)
     };
 
-    let mut app = match App::new(pool, picker, config_for_app).await {
+    let mut app = match App::new(pool, picker, config).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };
@@ -295,7 +324,9 @@ async fn run_tui(pool: sqlx::PgPool, config_opt: Option<config::Config>) -> Resu
     }
 
     // Set up terminal
+    install_panic_hook();
     enable_raw_mode()?;
+    let guard = TerminalGuard;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -304,17 +335,21 @@ async fn run_tui(pool: sqlx::PgPool, config_opt: Option<config::Config>) -> Resu
 
     let result = run_loop(&mut terminal, &mut app, scraper_rx).await;
 
-    // Always restore terminal, even on error
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Restore the terminal before anything else, even on error.
+    drop(guard);
 
     shutdown.cancel();
-    if let Some(handle) = coordinator_handle {
-        let _ = handle.await;
-    }
+    let _ = coordinator_handle.await;
 
     result
+}
+
+/// Run one event through the app. A handler error (DB blip, scraper failure)
+/// is shown in the status bar instead of ending the session.
+async fn dispatch(app: &mut App, event: AppEvent) {
+    if let Err(e) = app.handle_event(event).await {
+        app.set_msg(format!("error: {e:#}"));
+    }
 }
 
 async fn run_loop(
@@ -324,7 +359,6 @@ async fn run_loop(
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
-    let mut msg_timer: u8 = 0;
 
     loop {
         terminal.draw(|f| ui::draw(f, &mut *app))?;
@@ -333,7 +367,7 @@ async fn run_loop(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        app.handle_event(AppEvent::Key(key)).await?;
+                        dispatch(app, AppEvent::Key(key)).await;
                     }
                     Some(Err(e)) => return Err(e.into()),
                     _ => {}
@@ -342,22 +376,13 @@ async fn run_loop(
 
             msg = scraper_rx.recv() => {
                 if let Some(ev) = msg {
-                    app.handle_event(AppEvent::ScraperMsg(ev)).await?;
+                    dispatch(app, AppEvent::ScraperMsg(ev)).await;
                 }
             }
 
             _ = tick.tick() => {
-                app.handle_event(AppEvent::Tick).await?;
-
-                if app.status_msg.is_some() {
-                    msg_timer += 1;
-                    if msg_timer >= 8 {
-                        app.clear_msg();
-                        msg_timer = 0;
-                    }
-                } else {
-                    msg_timer = 0;
-                }
+                dispatch(app, AppEvent::Tick).await;
+                app.expire_msg(std::time::Instant::now());
             }
         }
 
@@ -367,4 +392,28 @@ async fn run_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn panic_hook_chains_to_previous_hook() {
+        let called = Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        std::panic::set_hook(Box::new(move |_| c.store(true, Ordering::SeqCst)));
+        install_panic_hook();
+        let _ = std::panic::catch_unwind(|| panic!("boom"));
+        let _ = std::panic::take_hook(); // back to default
+        assert!(called.load(Ordering::SeqCst), "previous hook was not called");
+    }
+
+    #[test]
+    fn restore_terminal_is_idempotent_without_a_tty() {
+        restore_terminal();
+        restore_terminal();
+    }
 }

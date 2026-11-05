@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -140,6 +141,8 @@ pub struct App {
     pub error_rx:        Option<mpsc::Receiver<String>>,
 
     pub status_msg: Option<String>,
+    /// When `status_msg` was last set; expiry is measured from here.
+    status_msg_at: Option<Instant>,
 
     // AddSearch screen state
     pub add_search_query:        String,
@@ -222,6 +225,7 @@ impl App {
             session_dir:      None,
             error_rx:         None,
             status_msg:       None,
+            status_msg_at:    None,
             add_search_query:        String::new(),
             add_search_results:      Vec::new(),
             add_search_grid_cols:    1,
@@ -1025,8 +1029,12 @@ impl App {
 
         // Drain error channel — route errors to TUI status bar
         if let Some(err_rx) = &mut self.error_rx {
+            let mut msgs = Vec::new();
             while let Ok(msg) = err_rx.try_recv() {
-                self.status_msg = Some(msg);
+                msgs.push(msg);
+            }
+            for msg in msgs {
+                self.set_msg(msg);
             }
         }
 
@@ -1242,8 +1250,22 @@ impl App {
         self.chapter_list.iter().position(|c| !c.completed).unwrap_or(0)
     }
 
-    pub fn set_msg(&mut self, msg: impl Into<String>) { self.status_msg = Some(msg.into()); }
-    pub fn clear_msg(&mut self)                       { self.status_msg = None; }
+    pub fn set_msg(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some(msg.into());
+        self.status_msg_at = Some(Instant::now());
+    }
+    pub fn clear_msg(&mut self) {
+        self.status_msg = None;
+        self.status_msg_at = None;
+    }
+    /// Clear the status message if it has been showing for at least `STATUS_MSG_TTL`.
+    pub fn expire_msg(&mut self, now: Instant) {
+        if let Some(at) = self.status_msg_at {
+            if msg_expired(at, now, STATUS_MSG_TTL) {
+                self.clear_msg();
+            }
+        }
+    }
 
     /// Get or create a StatefulProtocol for a manhwa's cover image.
     pub fn get_cover_protocol(&mut self, manhwa_id: i64) -> Option<&mut StatefulProtocol> {
@@ -1489,4 +1511,35 @@ async fn fetch_chapter_images(
     }
 
     let _ = tx.send(None).await;
+}
+
+/// How long a status-bar message stays visible.
+pub const STATUS_MSG_TTL: Duration = Duration::from_secs(2);
+
+/// True once a message set at `set_at` has been visible for `ttl` as of `now`.
+pub fn msg_expired(set_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(set_at) >= ttl
+}
+
+#[cfg(test)]
+mod msg_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn expiry_is_relative_to_when_set() {
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(2);
+        assert!(!msg_expired(t0, t0 + Duration::from_millis(1999), ttl));
+        assert!(msg_expired(t0, t0 + ttl, ttl));
+        // A message set later is not expired by an earlier message's age.
+        let t1 = t0 + Duration::from_millis(1900);
+        assert!(!msg_expired(t1, t0 + Duration::from_millis(2100), ttl));
+    }
+
+    #[test]
+    fn now_before_set_is_not_expired() {
+        let t0 = Instant::now();
+        assert!(!msg_expired(t0 + Duration::from_secs(1), t0, Duration::from_secs(2)));
+    }
 }

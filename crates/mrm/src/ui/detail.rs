@@ -133,7 +133,7 @@ fn draw_chapters(f: &mut Frame, app: &App, area: Rect) {
 
             let date_span = match &ch.released_at {
                 Some(d) => Span::styled(
-                    format!("  {}", &d[..10.min(d.len())]),
+                    format!("  {}", d.get(..10).unwrap_or(d)),
                     Style::default().fg(theme.text_secondary()),
                 ),
                 None => Span::raw(""),
