@@ -9,7 +9,6 @@ mod scraper;
 mod types;
 mod ui;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -26,21 +25,6 @@ use tokio_util::sync::CancellationToken;
 use app::App;
 use scraper::ScraperEvent;
 use types::AppEvent;
-
-/// Find config.toml: CWD first, then ~/.config/mrm/
-fn config_file_path() -> PathBuf {
-    let local = PathBuf::from("config.toml");
-    if local.exists() {
-        return local;
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let xdg = PathBuf::from(home).join(".config/mrm/config.toml");
-        if xdg.exists() {
-            return xdg;
-        }
-    }
-    local // fallback to CWD (will fail gracefully)
-}
 
 // ---------------------------------------------------------------------------
 // Startup cleanup
@@ -112,19 +96,19 @@ fn parse_args() -> Mode {
 async fn main() -> Result<()> {
     let mode = parse_args();
 
-    let url = std::env::var("MRM_DATABASE_URL").context("MRM_DATABASE_URL not set")?;
+    let config = config::load_config()
+        .context("Config required — create config.toml (see README)")?;
+    let url = config::resolve_database_url(
+        std::env::var("MRM_DATABASE_URL").ok(), &config.db, &config::config_dir())?;
     let pool = match db::open_db(&url).await {
         Ok(p) => p,
-        Err(e) => { eprintln!("mrm: DB error: {e}"); return Err(e); }
+        Err(e) => { eprintln!("mrm: database error: {e:#}"); return Err(e); }
     };
 
-    let config = config::load_config()
-        .context("Config required — create config.toml (see README)");
-
     match mode {
-        Mode::Daemon => run_daemon(pool, config?).await,
-        Mode::Once   => run_once(pool, config?).await,
-        Mode::Tui    => run_tui(pool, config.ok()).await,
+        Mode::Daemon => run_daemon(pool, config).await,
+        Mode::Once   => run_once(pool, config).await,
+        Mode::Tui    => run_tui(pool, Some(config)).await,
     }
 }
 

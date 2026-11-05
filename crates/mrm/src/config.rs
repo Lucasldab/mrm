@@ -17,7 +17,7 @@ use serde::Deserialize;
 pub struct Config {
     pub sources:       HashMap<String, SourceConfig>,
     pub notifications: NotificationsConfig,
-    #[allow(dead_code)]
+    #[serde(default)]
     pub db:            DbConfig,
     #[serde(default)]
     pub keys:          KeysConfig,
@@ -105,10 +105,41 @@ pub struct NtfyConfig {
 fn default_ntfy_enabled() -> bool { true }
 fn default_ntfy_server()  -> String { "https://ntfy.sh".into() }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct DbConfig {
-    #[allow(dead_code)]
-    pub path: String,
+    /// File holding the Postgres URL (0600, outside git). `~/` expanded;
+    /// relative paths resolve against the config file's directory.
+    #[serde(default)]
+    pub url_file: Option<String>,
+}
+
+/// MRM_DATABASE_URL wins; otherwise read [db] url_file.
+pub fn resolve_database_url(env: Option<String>, db: &DbConfig, config_dir: &std::path::Path) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(url) = env.filter(|u| !u.is_empty()) {
+        return Ok(url);
+    }
+    let raw = db.url_file.as_deref()
+        .context("no database configured: set [db] url_file in config.toml (or MRM_DATABASE_URL)")?;
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
+        None => config_dir.join(raw),
+    };
+    let meta = std::fs::metadata(&path)
+        .with_context(|| format!("database url_file {} not found", path.display()))?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!("{} holds a password and is readable by others: chmod 600 it", path.display());
+    }
+    let url = std::fs::read_to_string(&path)?.trim().to_string();
+    anyhow::ensure!(!url.is_empty(), "{} is empty", path.display());
+    Ok(url)
+}
+
+/// Directory of the config file load_config() uses (CWD if none found).
+pub fn config_dir() -> std::path::PathBuf {
+    find_config_path()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 // ---------------------------------------------------------------------------
@@ -493,4 +524,52 @@ fn find_config_path() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod db_url_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write(dir: &std::path::Path, name: &str, body: &str, mode: u32) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn env_wins() {
+        let db = DbConfig { url_file: Some("/nonexistent".into()) };
+        assert_eq!(resolve_database_url(Some("postgres://e".into()), &db, std::path::Path::new("/")).unwrap(), "postgres://e");
+    }
+
+    #[test]
+    fn reads_relative_file_trimmed() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "db_url", "postgres://u:p@h:5433/mrm\n", 0o600);
+        let db = DbConfig { url_file: Some("db_url".into()) };
+        assert_eq!(resolve_database_url(None, &db, d.path()).unwrap(), "postgres://u:p@h:5433/mrm");
+    }
+
+    #[test]
+    fn refuses_group_or_world_readable() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "db_url", "postgres://x", 0o644);
+        let db = DbConfig { url_file: Some("db_url".into()) };
+        let e = resolve_database_url(None, &db, d.path()).unwrap_err().to_string();
+        assert!(e.contains("chmod 600"), "{e}");
+    }
+
+    #[test]
+    fn missing_config_is_explained() {
+        let e = resolve_database_url(None, &DbConfig::default(), std::path::Path::new("/")).unwrap_err().to_string();
+        assert!(e.contains("url_file"), "{e}");
+    }
+
+    #[test]
+    fn config_without_db_section_parses() {
+        let c: Config = toml::from_str("[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n").unwrap();
+        assert!(c.db.url_file.is_none());
+    }
 }

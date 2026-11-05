@@ -17,7 +17,9 @@ enabled = true
 poll_interval_minutes = 30
 
 [db]
-path = "mrm.db"
+# File containing the Postgres URL, e.g. postgres://mrm:PASSWORD@host:5433/mrm
+# Keep it chmod 600 and out of git. MRM_DATABASE_URL overrides this.
+url_file = "~/.config/mrm/db_url"
 
 [rv]
 scroll_speed = 80
