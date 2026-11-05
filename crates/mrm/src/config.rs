@@ -168,6 +168,7 @@ pub struct KeysConfig {
     // Detail
     pub set_status:   String,
     pub mark_unread:  String,
+    pub mark_read:    String,
     pub clear_override: String,
 
     // Reader
@@ -197,6 +198,7 @@ impl Default for KeysConfig {
             delete:         "d".into(),
             set_status:     "s".into(),
             mark_unread:    "u".into(),
+            mark_read:      "r".into(),
             clear_override: "c".into(),
             next_chapter:   "]".into(),
             prev_chapter:   "[".into(),
@@ -236,6 +238,7 @@ impl KeysConfig {
     pub fn delete(&self)         -> KeyCode { Self::parse_key(&self.delete) }
     pub fn set_status(&self)     -> KeyCode { Self::parse_key(&self.set_status) }
     pub fn mark_unread(&self)    -> KeyCode { Self::parse_key(&self.mark_unread) }
+    pub fn mark_read(&self)      -> KeyCode { Self::parse_key(&self.mark_read) }
     pub fn clear_override(&self) -> KeyCode { Self::parse_key(&self.clear_override) }
     pub fn next_chapter(&self)   -> KeyCode { Self::parse_key(&self.next_chapter) }
     pub fn prev_chapter(&self)   -> KeyCode { Self::parse_key(&self.prev_chapter) }

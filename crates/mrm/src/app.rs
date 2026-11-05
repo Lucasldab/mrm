@@ -139,6 +139,18 @@ pub struct App {
     pub(crate) host_fullscreen: Option<HostFullscreen>,
     pub session_dir:     Option<TempDir>,
     pub error_rx:        Option<mpsc::Receiver<String>>,
+    /// Cancels the running `fetch_chapter_images` task (drops its downloads).
+    fetch_cancel:        Option<tokio_util::sync::CancellationToken>,
+    /// Spawning the viewer failed for this chapter; do not retry every tick.
+    viewer_launch_failed: bool,
+    /// A viewer was successfully launched for the current chapter.
+    viewer_launched:     bool,
+    /// The viewer child exited on its own; the Reader screen should close.
+    viewer_exited:       bool,
+    /// The fetch task reported completion (all pages resolved).
+    loading_finished:    bool,
+    pages_ok:            usize,
+    pages_failed:        usize,
 
     pub status_msg: Option<String>,
     /// When `status_msg` was last set; expiry is measured from here.
@@ -224,6 +236,13 @@ impl App {
             host_fullscreen:     None,
             session_dir:      None,
             error_rx:         None,
+            fetch_cancel:     None,
+            viewer_launch_failed: false,
+            viewer_launched:  false,
+            viewer_exited:    false,
+            loading_finished: false,
+            pages_ok:         0,
+            pages_failed:     0,
             status_msg:       None,
             status_msg_at:    None,
             add_search_query:        String::new(),
@@ -295,6 +314,16 @@ impl App {
             AppEvent::Key(key) => self.handle_key(key).await?,
             AppEvent::Tick     => {
                 self.poll_images();
+                if self.viewer_exited {
+                    if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
+                        // Viewer closed on its own: save progress, back to Detail.
+                        self.save_reader_progress(chapter_id, manhwa_id).await?;
+                        self.kill_viewer();
+                        self.open_detail(manhwa_id).await?;
+                    } else {
+                        self.viewer_exited = false;
+                    }
+                }
                 // Periodically re-check disk for newly downloaded covers
                 // (background preload runs async, covers appear over time).
                 // Every ~2 seconds (8 ticks × 250ms).
@@ -406,6 +435,12 @@ impl App {
         if key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
+            if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
+                if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id).await {
+                    eprintln!("could not save reading progress: {e:#}");
+                }
+                self.kill_viewer();
+            }
             self.should_quit = true;
             return Ok(());
         }
@@ -583,6 +618,16 @@ impl App {
                 self.refresh_detail(manhwa_id).await?;
                 self.set_msg("Marked as unread");
             }
+        } else if k == self.keys.mark_read() {
+            if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
+                let chapter_id = ch.id;
+                db::start_chapter(&self.pool, chapter_id).await?;
+                db::update_scroll(&self.pool, chapter_id, 1.0).await?;
+                db::recompute_status(&self.pool, manhwa_id).await?;
+                self.refresh_detail(manhwa_id).await?;
+                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.set_msg("Marked as read");
+            }
         } else if k == self.keys.clear_override() {
             if let Some(manhwa) = &self.current_manhwa {
                 if manhwa.status_override {
@@ -659,16 +704,16 @@ impl App {
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         let k = key.code;
         if k == KeyCode::Esc || k == self.keys.back() {
+            self.save_reader_progress(chapter_id, manhwa_id).await?;
             self.kill_viewer();
-            self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_detail(manhwa_id).await?;
         } else if k == self.keys.next_chapter() {
+            self.save_reader_progress(chapter_id, manhwa_id).await?;
             self.kill_viewer();
-            self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_next_chapter(manhwa_id, chapter_id).await?;
         } else if k == self.keys.prev_chapter() {
+            self.save_reader_progress(chapter_id, manhwa_id).await?;
             self.kill_viewer();
-            self.update_read_progress(chapter_id, manhwa_id).await?;
             self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
         Ok(())
@@ -940,15 +985,8 @@ impl App {
     pub async fn open_reader(&mut self, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         db::start_chapter(&self.pool, chapter_id).await?;
         self.current_chapter  = self.chapter_list.iter().find(|c| c.id == chapter_id).cloned();
-        self.image_paths          = Vec::new();
-        self.image_pending        = Vec::new();
-        self.next_expected_image  = 0;
+        self.reset_reader_state();
         self.images_loading       = true;
-        self.viewer_process       = None;
-        self.viewer_pid           = None;
-        self.viewer_socket        = None;
-        self.viewer_loaded_count  = 0;
-        self.viewer_drop_warned   = false;
         self.screen           = Screen::Reader { manhwa_id, chapter_id };
 
         if let Some(ch) = &self.current_chapter {
@@ -970,8 +1008,14 @@ impl App {
                 .unwrap_or_else(std::env::temp_dir);
             self.session_dir = session_dir;
 
+            let cancel = tokio_util::sync::CancellationToken::new();
+            self.fetch_cancel = Some(cancel.clone());
             tokio::spawn(async move {
-                fetch_chapter_images(&source, &url, session_path, tx, err_tx).await;
+                // Dropping the fetch future on cancel aborts its JoinSet.
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = fetch_chapter_images(&source, &url, session_path, tx, err_tx) => {}
+                }
             });
         }
         Ok(())
@@ -1018,6 +1062,8 @@ impl App {
                 self.images_loading  = false;
                 self.image_rx        = None;
                 self.error_rx        = None;
+                self.viewer_exited   = true;
+                if let Some(c) = self.fetch_cancel.take() { c.cancel(); }
                 if let Some(h) = self.host_fullscreen.take() {
                     restore_host_fullscreen(&h);
                 }
@@ -1043,6 +1089,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(Some((idx, path))) => {
+                        if path.is_some() { self.pages_ok += 1; } else { self.pages_failed += 1; }
                         self.image_pending.push((idx, path));
                     }
                     Ok(None) => { done = true; break; }
@@ -1065,8 +1112,14 @@ impl App {
 
         let had_viewer = self.viewer_process.is_some();
 
-        if !had_viewer && !self.image_paths.is_empty() {
+        if !had_viewer && !self.image_paths.is_empty() && !self.viewer_launch_failed {
             self.launch_viewer();
+            if self.viewer_process.is_some() {
+                self.viewer_launched = true;
+            } else {
+                // launch_* already set the one error message; don't retry per tick.
+                self.viewer_launch_failed = true;
+            }
         } else if had_viewer {
             // Feed new images to running viewer
             let total = self.image_paths.len();
@@ -1078,6 +1131,7 @@ impl App {
         }
 
         if done {
+            self.loading_finished = true;
             self.images_loading = false;
             self.image_rx       = None;
             self.error_rx       = None;
@@ -1208,32 +1262,53 @@ impl App {
         }
     }
 
+    /// Clear all per-chapter reader state and cancel the page download task.
+    fn reset_reader_state(&mut self) {
+        if let Some(c) = self.fetch_cancel.take() { c.cancel(); }
+        self.images_loading       = false;
+        self.image_rx             = None;
+        self.error_rx             = None;
+        self.image_paths          = Vec::new();
+        self.image_pending        = Vec::new();
+        self.next_expected_image  = 0;
+        self.viewer_process       = None;  // Drop kills viewer
+        self.viewer_pid           = None;
+        self.viewer_socket        = None;
+        self.viewer_loaded_count  = 0;
+        self.viewer_drop_warned   = false;
+        self.viewer_launch_failed = false;
+        self.viewer_launched      = false;
+        self.viewer_exited        = false;
+        self.loading_finished     = false;
+        self.pages_ok             = 0;
+        self.pages_failed         = 0;
+    }
+
+    /// Tear down the viewer and the chapter's download state. Call
+    /// `save_reader_progress` first: this clears what it reads.
     fn kill_viewer(&mut self) {
-        self.viewer_process      = None;  // Drop kills viewer
+        self.reset_reader_state();
         self.session_dir         = None;  // Drop + TempDir deletes /tmp/mrm_*/
-        self.viewer_pid          = None;
-        self.viewer_socket       = None;
-        self.viewer_loaded_count = 0;
-        self.viewer_drop_warned  = false;
         if let Some(h) = self.host_fullscreen.take() {
             restore_host_fullscreen(&h);
         }
-        self.update_read_progress_sync();
     }
 
     // -----------------------------------------------------------------------
     // Progress tracking
     // -----------------------------------------------------------------------
 
-    fn update_read_progress_sync(&mut self) {
-        // Mark as read if we had images (fire-and-forget via tokio)
-        // Called from sync context (kill_viewer), so we note it for next async tick.
-        // Progress is updated properly via update_read_progress in async context.
-    }
-
-    async fn update_read_progress(&mut self, chapter_id: i64, manhwa_id: i64) -> Result<()> {
-        let pct = if self.image_paths.is_empty() { 0.0 } else { 1.0 };
-        let just_completed = db::update_scroll(&self.pool, chapter_id, pct).await?;
+    /// Mark the chapter read only if the viewer was used and every page loaded.
+    async fn save_reader_progress(&mut self, chapter_id: i64, manhwa_id: i64) -> Result<()> {
+        if !should_mark_complete(
+            self.viewer_launched,
+            self.loading_finished,
+            self.pages_ok,
+            self.pages_ok + self.pages_failed,
+        ) {
+            return Ok(());
+        }
+        let just_completed = db::update_scroll(&self.pool, chapter_id, 1.0).await?;
         if just_completed {
             db::recompute_status(&self.pool, manhwa_id).await?;
             self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
@@ -1541,5 +1616,44 @@ mod msg_tests {
     fn now_before_set_is_not_expired() {
         let t0 = Instant::now();
         assert!(!msg_expired(t0 + Duration::from_secs(1), t0, Duration::from_secs(2)));
+    }
+}
+
+/// A chapter counts as read only when the user closed the viewer and every
+/// page loaded: a mistaken open, a skipped chapter or a partly failed
+/// download must not complete it.
+pub fn should_mark_complete(
+    user_closed: bool,
+    loading_done: bool,
+    pages_ok: usize,
+    pages_total: usize,
+) -> bool {
+    user_closed && loading_done && pages_total > 0 && pages_ok == pages_total
+}
+
+#[cfg(test)]
+mod complete_tests {
+    use super::should_mark_complete;
+
+    #[test]
+    fn mistaken_open_then_esc_is_not_complete() {
+        // Viewer never opened / still loading when closed.
+        assert!(!should_mark_complete(false, true, 10, 10));
+        assert!(!should_mark_complete(true, false, 1, 10));
+    }
+
+    #[test]
+    fn partial_failures_are_not_complete() {
+        assert!(!should_mark_complete(true, true, 20, 40));
+    }
+
+    #[test]
+    fn all_loaded_and_closed_is_complete() {
+        assert!(should_mark_complete(true, true, 40, 40));
+    }
+
+    #[test]
+    fn zero_pages_is_not_complete() {
+        assert!(!should_mark_complete(true, true, 0, 0));
     }
 }

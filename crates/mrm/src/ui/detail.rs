@@ -189,8 +189,8 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let default_hint = format!(
-        "{}/{} move  {} read  {} status  {} unread  R refresh{}  Esc back",
-        keys.down, keys.up, keys.open, keys.set_status, keys.mark_unread, override_hint
+        "{}/{} move  {} read  {} status  {} unread  {} mark read  R refresh{}  Esc back",
+        keys.down, keys.up, keys.open, keys.set_status, keys.mark_unread, keys.mark_read, override_hint
     );
     let msg = app.status_msg.as_deref().unwrap_or(default_hint.as_str());
 
