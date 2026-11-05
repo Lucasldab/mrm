@@ -27,49 +27,6 @@ use app::App;
 use scraper::ScraperEvent;
 use types::AppEvent;
 
-// ---------------------------------------------------------------------------
-// DB path resolution
-// ---------------------------------------------------------------------------
-
-fn db_path() -> String {
-    // Check config.toml first for an explicit path
-    let config_path = config_file_path();
-    let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    if let Ok(contents) = std::fs::read_to_string(&config_path) {
-        if let Ok(config) = toml::from_str::<toml::Value>(&contents) {
-            if let Some(path) = config.get("db").and_then(|d| d.get("path")).and_then(|p| p.as_str()) {
-                if !path.is_empty() {
-                    let db = PathBuf::from(path);
-                    // Resolve relative paths against the config file's directory
-                    let resolved = if db.is_absolute() { db } else { config_dir.join(&db) };
-                    if resolved.exists() {
-                        return resolved.to_string_lossy().into_owned();
-                    }
-                }
-            }
-        }
-    }
-
-    // Search common locations
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        PathBuf::from("mrm.db"),                                          // CWD
-        PathBuf::from(&home).join(".config/mrm/mrm.db"),                  // XDG config
-        PathBuf::from(&home).join(".local/share/mrm/mrm.db"),             // XDG data
-        PathBuf::from("../../mrm.db"),                                    // dev: from crates/mrm/
-    ];
-    for p in &candidates {
-        if p.exists() {
-            return p.to_string_lossy().into_owned();
-        }
-    }
-
-    // Default: create in XDG config dir
-    let default_dir = PathBuf::from(&home).join(".config/mrm");
-    let _ = std::fs::create_dir_all(&default_dir);
-    default_dir.join("mrm.db").to_string_lossy().into_owned()
-}
-
 /// Find config.toml: CWD first, then ~/.config/mrm/
 fn config_file_path() -> PathBuf {
     let local = PathBuf::from("config.toml");
@@ -155,8 +112,8 @@ fn parse_args() -> Mode {
 async fn main() -> Result<()> {
     let mode = parse_args();
 
-    let db_path = db_path();
-    let pool = match db::open_db(&db_path).await {
+    let url = std::env::var("MRM_DATABASE_URL").context("MRM_DATABASE_URL not set")?;
+    let pool = match db::open_db(&url).await {
         Ok(p) => p,
         Err(e) => { eprintln!("mrm: DB error: {e}"); return Err(e); }
     };
@@ -175,7 +132,7 @@ async fn main() -> Result<()> {
 // Daemon mode: poll forever, send notifications, no TUI
 // ---------------------------------------------------------------------------
 
-async fn run_daemon(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> {
+async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     eprintln!("mrm: daemon mode — polling every {} minutes", config.notifications.poll_interval_minutes);
     eprintln!("mrm: press Ctrl-C to stop");
 
@@ -202,7 +159,7 @@ async fn run_daemon(pool: sqlx::SqlitePool, config: config::Config) -> Result<()
 // Once mode: single poll, then exit
 // ---------------------------------------------------------------------------
 
-async fn run_once(pool: sqlx::SqlitePool, config: config::Config) -> Result<()> {
+async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     eprintln!("mrm: single poll...");
 
     let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
@@ -301,7 +258,7 @@ fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap
 // TUI mode (default)
 // ---------------------------------------------------------------------------
 
-async fn run_tui(pool: sqlx::SqlitePool, config_opt: Option<config::Config>) -> Result<()> {
+async fn run_tui(pool: sqlx::PgPool, config_opt: Option<config::Config>) -> Result<()> {
     startup_cleanup_tmp();
 
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);

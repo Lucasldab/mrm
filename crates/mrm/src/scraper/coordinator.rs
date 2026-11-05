@@ -1,6 +1,6 @@
 //! Background scraper coordinator — Rust replacement for scraper/daemon.py.
 //!
-//! Spawned from main() as a tokio task. Shares the SqlitePool with the TUI.
+//! Spawned from main() as a tokio task. Shares the PgPool with the TUI.
 //! Communicates new-chapter events to the TUI via an mpsc Sender<ScraperEvent>.
 //! Shuts down cleanly when the provided CancellationToken is cancelled.
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::SqlitePool;
+use sqlx::postgres::PgPool;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -43,14 +43,14 @@ const DISCOVERY_META_KEY: &str = "last_discovery_poll_at";
 /// Run the scraper coordinator until the CancellationToken is cancelled.
 ///
 /// Arguments:
-///   pool        — shared SqlitePool (WAL mode, safe for concurrent reads)
+///   pool        — shared PgPool
 ///   config      — loaded at startup; poll_interval_minutes controls cadence
 ///   shutdown    — cancelled by main() on Ctrl-C / SIGTERM
 ///   scraper_tx  — sends ScraperEvent to the TUI run_loop
 ///   quiet       — when true, suppress stderr progress logs (TUI alternate-screen
 ///                 would otherwise get corrupted by mid-render writes)
 pub async fn coordinator_task(
-    pool: SqlitePool,
+    pool: PgPool,
     config: Config,
     shutdown: CancellationToken,
     scraper_tx: mpsc::Sender<ScraperEvent>,
@@ -109,7 +109,7 @@ fn build_registry(config: &Config, quiet: bool) -> HashMap<&'static str, Box<dyn
 // ---------------------------------------------------------------------------
 
 async fn poll_all(
-    pool: &SqlitePool,
+    pool: &PgPool,
     config: &Config,
     registry: &HashMap<&'static str, Box<dyn Scraper>>,
     scraper_tx: &mpsc::Sender<ScraperEvent>,
@@ -210,7 +210,7 @@ async fn poll_all(
 // Discovery
 // ---------------------------------------------------------------------------
 
-async fn should_run_discovery(pool: &SqlitePool) -> bool {
+async fn should_run_discovery(pool: &PgPool) -> bool {
     let last = match db::get_discovery_meta(pool, DISCOVERY_META_KEY).await {
         Ok(v) => v,
         Err(_) => return true,
@@ -228,7 +228,7 @@ async fn should_run_discovery(pool: &SqlitePool) -> bool {
 /// not already in the library into discovered_manhwa. Returns how many new
 /// rows were inserted (existing + dismissed entries don't count).
 async fn run_discovery(
-    pool: &SqlitePool,
+    pool: &PgPool,
     registry: &HashMap<&'static str, Box<dyn Scraper>>,
     quiet: bool,
 ) -> Result<usize> {

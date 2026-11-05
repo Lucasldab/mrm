@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
-use sqlx::sqlite::SqlitePool;
+use sqlx::postgres::PgPool;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -104,7 +104,7 @@ fn restore_host_fullscreen(h: &HostFullscreen) {
 // ---------------------------------------------------------------------------
 
 pub struct App {
-    pub pool:          SqlitePool,
+    pub pool:          PgPool,
     pub screen:        Screen,
     pub should_quit:   bool,
 
@@ -191,7 +191,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(pool: SqlitePool, picker: Option<Picker>, config: crate::config::Config) -> Result<Self> {
+    pub async fn new(pool: PgPool, picker: Option<Picker>, config: crate::config::Config) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
 
         Ok(Self {
@@ -447,7 +447,7 @@ impl App {
 
     async fn do_delete_manhwa(&mut self, manhwa_id: i64) -> Result<()> {
         db::delete_manhwa(&self.pool, manhwa_id).await?;
-        // SQLite reuses freed rowids — drop the cached cover file and any
+        // Ids may be reused — drop the cached cover file and any
         // in-memory entry so a future series that lands on this id doesn't
         // inherit stale artwork.
         let _ = std::fs::remove_file(self.cover_cache.cache_dir().join(format!("{manhwa_id}.jpg")));
@@ -570,7 +570,7 @@ impl App {
             if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
                 let chapter_id = ch.id;
                 sqlx::query(
-                    "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = ?",
+                    "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = $1",
                 )
                 .bind(chapter_id)
                 .execute(&self.pool)
