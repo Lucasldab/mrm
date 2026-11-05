@@ -1418,15 +1418,7 @@ impl App {
                 // writes by rv never hit a closed pipe.
                 if let Some(stdout) = child.stdout.take() {
                     let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        use std::io::BufRead;
-                        let mut lines = std::io::BufReader::new(stdout).lines();
-                        if let Some(Ok(first)) = lines.next() {
-                            let _ = tx.send(first.trim().to_string());
-                        }
-                        drop(tx);
-                        for _ in lines {}
-                    });
+                    std::thread::spawn(move || forward_rv_socket(stdout, tx));
                     self.rv_socket_rx = Some(rx);
                 }
                 let pid = child.id();
@@ -1944,6 +1936,20 @@ fn open_viewer_log(name: &str) -> Option<std::fs::File> {
         .open(dir.join(name)).ok()
 }
 
+/// Read rv's stdout: send the first line (the socket path) down `tx`, then
+/// drain the rest until EOF so rv never writes to a closed pipe. A first line
+/// that is not valid UTF-8 is converted lossily; a read error ends the thread.
+fn forward_rv_socket<R: std::io::Read>(reader: R, tx: std::sync::mpsc::Sender<String>) {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(reader);
+    let mut first = Vec::new();
+    if reader.read_until(b'\n', &mut first).is_ok() && !first.is_empty() {
+        let _ = tx.send(String::from_utf8_lossy(&first).trim().to_string());
+    }
+    drop(tx);
+    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+}
+
 /// How long a status-bar message stays visible.
 pub const STATUS_MSG_TTL: Duration = Duration::from_secs(2);
 
@@ -2353,6 +2359,46 @@ mod task_tests {
         app.handle_event(press(KeyCode::Char('/'))).await.unwrap();
         assert!(app.search_query.is_empty());
         assert_eq!(app.selected_manhwa_id(), Some(id), "cursor must stay on the same series");
+    }
+
+    #[test]
+    fn rv_stdout_first_line_is_the_socket_and_the_rest_is_drained() {
+        struct Counting<'a>(&'a [u8], &'a std::sync::atomic::AtomicUsize);
+        impl std::io::Read for Counting<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = std::io::Read::read(&mut self.0, buf)?;
+                self.1.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+                Ok(n)
+            }
+        }
+        let total = std::sync::atomic::AtomicUsize::new(0);
+        let data = b"/run/rv.sock\nmore\nlines\n";
+        let (tx, rx) = std::sync::mpsc::channel();
+        forward_rv_socket(Counting(data, &total), tx);
+        assert_eq!(rx.try_recv().unwrap(), "/run/rv.sock");
+        assert_eq!(total.load(std::sync::atomic::Ordering::SeqCst), data.len(), "stdout not drained to EOF");
+    }
+
+    #[test]
+    fn rv_stdout_invalid_utf8_first_line_does_not_stall_the_drain() {
+        let mut data = b"/run/\xff\xfe.sock\n".to_vec();
+        data.extend_from_slice(b"tail\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        forward_rv_socket(&data[..], tx);
+        assert_eq!(rx.try_recv().unwrap(), "/run/\u{fffd}\u{fffd}.sock");
+    }
+
+    #[test]
+    fn rv_stdout_persistent_read_error_terminates() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("bad"))
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        forward_rv_socket(Broken, tx); // must return, not spin
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
