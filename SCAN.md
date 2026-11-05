@@ -11,7 +11,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `src/main.rs` | CLI arg parsing (`--daemon`, `--once`, default TUI); DB path resolution (config.toml → XDG fallback chain); terminal setup / teardown; `run_tui` / `run_daemon` / `run_once` dispatch; 250ms event loop via `tokio::select!`; startup `tmp/mrm_*` cleanup. |
+| `src/main.rs` | CLI arg parsing (`--daemon`, `--once`, default TUI); database URL resolution (`MRM_DATABASE_URL`, else `[db] url_file` from config.toml; 0600 enforced); terminal setup / teardown; `run_tui` / `run_daemon` / `run_once` dispatch; 250ms event loop via `tokio::select!`; startup `tmp/mrm_*` cleanup. |
 
 ### Core application
 
@@ -25,7 +25,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `src/db.rs` | All SQLite access via `sqlx`. Opens pool with WAL mode, `foreign_keys=ON`, `busy_timeout=5000`. Inline schema migrations at startup (adds `description` column; creates `discovered_manhwa` and `discovery_meta` tables if absent). Core queries: fetch/insert/delete manhwa; upsert chapters; progress (start/scroll/complete); status recompute; discovery upsert/dismiss/delete; meta key-value store. |
+| `src/db.rs` | All Postgres access via `sqlx` (rustls). `open_db(url)` runs the embedded migrations in `migrations/` (additive only; `set_ignore_missing(true)` so older binaries keep working). Core queries: `apply_poll_result`, `claim_unnotified`, fetch/insert/delete manhwa; upsert chapters; progress (start/scroll/complete); status recompute; discovery upsert/dismiss/delete; meta key-value store. |
 
 ### Scraper subsystem
 
@@ -62,83 +62,8 @@
 
 ---
 
-## (c) Risky Area: Non-Transactional Chapter Upserts in the Coordinator
+## (c) Risky Area: Non-Transactional Chapter Upserts in the Coordinator (RESOLVED)
 
-### What the code does
+**Resolved by the Postgres move.** `db::apply_poll_result` now writes each series' poll (chapters, status, publication state) in one transaction, and `db::claim_unnotified` marks unannounced chapters (`chapter.notified_at`) in a single UPDATE, so each chapter is announced exactly once across machines.
 
-`db::upsert_chapters` (`src/db.rs:308–356`) executes one `INSERT … ON CONFLICT DO UPDATE` statement **per chapter**, all running against the bare connection pool (no wrapping transaction):
-
-```rust
-for ch in chapters {
-    let already_exists: bool = sqlx::query(...)   // SELECT EXISTS
-        .fetch_one(pool).await?;
-
-    sqlx::query("INSERT INTO chapter … ON CONFLICT … DO UPDATE …")
-        .execute(pool).await?;
-
-    if !already_exists {
-        new_count += 1;
-    }
-}
-```
-
-The coordinator calls this inside `poll_all` (`src/scraper/coordinator.rs:152`) for every manhwa in the library — also without a surrounding transaction. Likewise `db::recompute_status` and `db::update_pub_status` are called after the upsert loop, not within it.
-
-### Why it's risky
-
-1. **Partial update on crash.** If the process is killed (SIGKILL, OOM, power loss) while `upsert_chapters` is mid-loop, some chapters are written and some are not. SQLite WAL protects individual statements from corruption, but the logical batch is not atomic. On the next startup:
-   - The `already_exists` check will find the partially-written chapters and count them as pre-existing, so `new_count` for those chapters is 0.
-   - `recompute_status` may have already been called (or not), leaving the manhwa's status inconsistent with its chapter/progress counts.
-   - The user gets no notification for chapters that arrived but were not counted.
-
-2. **`check-then-act` race with concurrent instances.** Nothing prevents running `mrm` (TUI) and `mrm --daemon` simultaneously. Both call `upsert_chapters` concurrently against the same DB. The SELECT-then-INSERT pair is not atomic: two processes can both observe `already_exists = false` for the same chapter and both increment `new_count`, leading to a double notification.
-
-3. **`recompute_status` called on stale snapshot.** Between `upsert_chapters` returning and `recompute_status` executing, another concurrent writer could have updated the progress table, so the status recompute may silently stomp on a status that was correct.
-
-### Suggested test
-
-```rust
-/// Verify that chapter upsert correctly reports new_count even after a
-/// simulated partial write (process restart mid-loop).
-///
-/// Desired behaviour: wrapping the loop in a transaction should make
-/// the batch atomic — either all chapters are counted as new, or none.
-#[tokio::test]
-async fn upsert_chapters_is_atomic() {
-    // 1. Open an in-memory SQLite pool and create the schema.
-    let pool = SqlitePool::connect(":memory:").await.unwrap();
-    setup_schema(&pool).await;
-
-    let manhwa_id = insert_test_manhwa(&pool).await;
-
-    // 2. Build a batch of 5 chapters.
-    let batch: Vec<ChapterData> = (1..=5).map(|n| ChapterData {
-        number: n as f64,
-        title: None,
-        url: format!("https://example.com/ch/{n}"),
-        released_at: None,
-    }).collect();
-
-    // 3. Simulate a partial write: insert only the first 3 manually.
-    for ch in &batch[..3] {
-        sqlx::query("INSERT INTO chapter (manhwa_id, number, title, url) VALUES (?,?,?,?)")
-            .bind(manhwa_id).bind(ch.number).bind(&ch.title).bind(&ch.url)
-            .execute(&pool).await.unwrap();
-    }
-
-    // 4. Now call upsert_chapters with the full 5-chapter batch.
-    let new_count = upsert_chapters(&pool, manhwa_id, &batch).await.unwrap();
-
-    // 5. Only chapters 4 and 5 should be "new" — chapters 1–3 already existed.
-    assert_eq!(new_count, 2,
-        "expected 2 new chapters; got {new_count} — \
-         partial-write simulation revealed double-counting or missed chapters");
-
-    // 6. Verify total chapter count is exactly 5 (no duplicates).
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapter WHERE manhwa_id = ?")
-        .bind(manhwa_id).fetch_one(&pool).await.unwrap();
-    assert_eq!(total, 5);
-}
-```
-
-This test currently passes because `already_exists` handles the idempotent-insert case correctly. The latent risk surfaces only in the TOCTOU/concurrent-writer scenario. To make it provably safe, `upsert_chapters` should wrap its loop in a single `pool.begin()` / `tx.commit()` transaction — identical to how `insert_manhwa_with_chapters` already handles its batch insert.
+Historical context: the old `upsert_chapters` ran one statement per chapter outside a transaction. A crash mid-loop left a partial batch (lost notifications), and two concurrent pollers could both count the same chapter as new (double notification). Both are closed by the atomic write plus the claim.

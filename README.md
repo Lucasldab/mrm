@@ -21,7 +21,8 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 ## Requirements
 
 - Rust 1.70+
-- SQLite3
+- PostgreSQL 14+ (see [Database](#database))
+- cmake and clang (see [Build dependencies](#build-dependencies))
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
 - An image viewer — either [imv](https://sr.ht/~exec64/imv/) or [rv](https://github.com/Lucasldab/readingViewer) (with `rv-msg`) on `PATH`
 - notify-send (optional, for desktop notifications)
@@ -33,10 +34,17 @@ Asura/Cloudflare-fronted sources work out of the box — no Python or venv neede
 ```sh
 git clone https://github.com/Lucasldab/mrm.git
 cd mrm
-cargo build --release
+make build
 ```
 
-The binary will be at `target/release/mrm`.
+The binary will be at `crates/mrm/target/release/mrm`.
+
+### Build dependencies
+
+Rust, cmake and clang. The Asura scraper uses BoringSSL (via `boring-sys2`), which builds from source and needs cmake plus libclang. Database access uses sqlx with rustls, so OpenSSL is not needed.
+
+- Arch: `pacman -S cmake clang`
+- Debian/Ubuntu: `apt install cmake clang libclang-dev`
 
 ## Configuration
 
@@ -63,10 +71,42 @@ enabled = true
 poll_interval_minutes = 30
 
 [db]
-path = "mrm.db"
+url_file = "~/.config/mrm/db_url"
 ```
 
-The database file (`mrm.db`) is auto-created at `~/.config/mrm/mrm.db` if no path is specified.
+## Database
+
+mrm stores its library in PostgreSQL 14+ (SQLite support was dropped). Create a role and database, e.g.:
+
+```sh
+sudo -u postgres psql -c "CREATE ROLE mrm LOGIN PASSWORD 'PASSWORD'"
+sudo -u postgres createdb -O mrm mrm
+```
+
+Put the connection URL in a file and point `[db] url_file` at it. The file must be `chmod 600` (mrm refuses to start otherwise); `~/` is expanded and relative paths are resolved against the config directory:
+
+```sh
+echo 'postgres://mrm:PASSWORD@db-host:5432/mrm' > ~/.config/mrm/db_url
+chmod 600 ~/.config/mrm/db_url
+```
+
+`MRM_DATABASE_URL` overrides `url_file` when set. Migrations run automatically on startup.
+
+### One daemon per library
+
+Several machines can share one database, but only the host that sends notifications should run `mrm --daemon`. Laptops run the TUI, whose background poller is quiet: it refreshes chapters but never claims notifications.
+
+### Migrations are additive only
+
+Migrations only add tables, columns and indexes. Older binaries ignore migrations they do not know (`set_ignore_missing`), so a machine that has not been updated keeps working after another one migrated the database. Never write a migration that drops or renames something.
+
+### Tests
+
+```sh
+make test
+```
+
+Database tests run against a throwaway Postgres cluster started by `scripts/with-test-pg` (needs `initdb` and `pg_ctl` on `PATH`: Arch `postgresql`; Debian `postgresql` plus `/usr/lib/postgresql/<ver>/bin` on `PATH`). Without `MRM_TEST_DATABASE_URL` the database tests skip.
 
 ## Usage
 
@@ -107,19 +147,23 @@ All keybinds can be customized in `config.toml` under `[keys]`.
 Off by default — desktop notifications via `notify-send` are the only thing the standard install enables. To also push release alerts to your phone, opt in at build time and configure an [ntfy](https://ntfy.sh) topic.
 
 ```sh
-cargo build --release --features ntfy
+make build-daemon
 ```
 
-Pick a hard-to-guess topic name (treat it as a shared secret — anyone subscribed can read your notifications), install the [ntfy app](https://ntfy.sh/), and subscribe to that same topic. Then add to `~/.config/mrm/config.toml`:
+Run your own ntfy server if you can, and pick a hard-to-guess topic name (treat it as a shared secret on a public server), install the [ntfy app](https://ntfy.sh/), and subscribe to that same topic. Then add to `~/.config/mrm/config.toml`:
 
 ```toml
 [notifications.ntfy]
 enabled  = true
-server   = "https://ntfy.sh"          # or your self-hosted instance
+server   = "https://ntfy.example"     # your self-hosted instance (or https://ntfy.sh)
 topic    = "mrm-pick-something-random"
 priority = "default"                  # optional: min|low|default|high|max
 # auth_token = "tk_..."               # optional, self-hosted with auth only
 ```
+
+### Notification model
+
+Only non-quiet pollers (`mrm --daemon`, `mrm --once`) notify; the TUI's poller never does. New chapters are claimed in the database (`chapter.notified_at`) in one UPDATE, so each chapter is announced exactly once even with several machines. Chapters that arrive together with a newly added series are never announced, and chapters you have already read are claimed silently. The claim happens before the push, so a failed push is not retried (at-most-once delivery).
 
 Run `mrm --daemon` (or `mrm --once`) and new chapters now fan out to both the desktop and your phone. The block is silently ignored on builds without the `ntfy` feature, so the same `config.toml` works on machines that opt out.
 
