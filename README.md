@@ -7,7 +7,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 - **TUI library** with grid/list views and cover image thumbnails
 - **Chapter reader** via external image viewer — supports [imv](https://sr.ht/~exec64/imv/) or [rv](https://github.com/Lucasldab/readingViewer), selectable in `config.toml`
 - **Auto-status tracking** — status updates automatically based on your reading progress
-- **Background polling** — checks sources for new chapters on a configurable interval
+- **Background polling** — checks sources for new chapters about 10 s after launch, then on a configurable interval
 - **Desktop notifications** via notify-send (mako)
 - **Search and add** new series from supported sources
 - **Configurable keybinds and theme colors** via TOML
@@ -138,6 +138,8 @@ mrm --once
 | `c` | Clear status override |
 | `]`/`[` | Next/previous chapter |
 | `o` | Sort library |
+| `p` | Poll sources for new chapters now (library) |
+| `R` | Refresh series from its source: metadata and new chapters (detail) |
 | `q` | Quit |
 
 All keybinds can be customized in `config.toml` under `[keys]`.
