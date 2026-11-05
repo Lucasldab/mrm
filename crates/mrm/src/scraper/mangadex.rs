@@ -312,13 +312,55 @@ impl Scraper for MangaDexScraper {
     }
 }
 
+/// Chapters from one feed page. Skips entries hosted elsewhere (MangaPlus,
+/// publisher sites: `externalUrl` set) and entries with `pages == 0`, which
+/// have no images on MangaDex. `seen` carries the per-number dedup across
+/// pages; the first readable entry for a number wins.
+fn parse_feed_items(items: &[serde_json::Value], seen: &mut HashSet<u64>) -> Vec<ChapterData> {
+    let mut out = Vec::new();
+    for item in items {
+        let attr = &item["attributes"];
+
+        if !attr["externalUrl"].is_null() || attr["pages"].as_u64() == Some(0) {
+            continue;
+        }
+
+        // Parse chapter number — skip if absent or unparseable
+        let Some(number) = attr["chapter"].as_str().and_then(|s| f64::from_str(s).ok()) else {
+            continue;
+        };
+        let Some(item_id) = item["id"].as_str() else { continue };
+
+        // Deduplicate: use bit representation for hash-equality on f64
+        if !seen.insert(number.to_bits()) {
+            continue;
+        }
+
+        // released_at: the YYYY-MM-DD prefix of publishAt
+        let released_at = attr["publishAt"]
+            .as_str()
+            .and_then(|s| s.get(..10))
+            .map(str::to_string);
+
+        out.push(ChapterData {
+            number,
+            title:       attr["title"].as_str().map(|s| s.to_string()),
+            url:         format!("{BASE}/chapter/{item_id}"),
+            released_at,
+        });
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 
 impl MangaDexScraper {
     /// Paginate through /manga/{id}/feed to collect every English chapter.
-    /// Deduplicates by chapter number (keeps first occurrence — earliest uploaded).
+    /// Deduplicates by chapter number, keeping the first readable entry in
+    /// feed order (chapter, then readableAt: the earliest readable upload),
+    /// so the chosen group is stable from one poll to the next.
     async fn _fetch_all_chapters(&self, manga_id: &str) -> Result<Vec<ChapterData>> {
         let mut chapters: Vec<ChapterData> = Vec::new();
         let mut seen: HashSet<u64> = HashSet::new();
@@ -351,6 +393,7 @@ impl MangaDexScraper {
                     .query(&[
                         ("translatedLanguage[]", "en"),
                         ("order[chapter]", "asc"),
+                        ("order[readableAt]", "asc"),
                         ("limit", &limit_str),
                         ("offset", &offset_str),
                         ("contentRating[]", "safe"),
@@ -360,6 +403,10 @@ impl MangaDexScraper {
                     .send()
                     .await
                     .with_context(|| format!("MangaDex GET {url} failed"))?;
+                // Without this a 429/5xx/400 body (no `data`) ended the loop
+                // and returned a partial chapter list as success (M6).
+                let r = r.check_status()
+                    .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
                 r.json::<serde_json::Value>()
                     .await
                     .with_context(|| format!("MangaDex GET {url} JSON parse failed"))
@@ -370,46 +417,7 @@ impl MangaDexScraper {
             let items = resp["data"].as_array().unwrap_or(&empty);
             let total = resp["total"].as_u64().unwrap_or(0) as usize;
 
-            for item in items {
-                let attr = &item["attributes"];
-
-                // Parse chapter number — skip if absent or unparseable
-                let ch_str = match attr["chapter"].as_str() {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let number = match f64::from_str(ch_str) {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-
-                // Deduplicate: use bit representation for hash-equality on f64
-                let key = number.to_bits();
-                if seen.contains(&key) {
-                    continue;
-                }
-                seen.insert(key);
-
-                let item_id = match item["id"].as_str() {
-                    Some(id) => id,
-                    None => continue,
-                };
-
-                // released_at: take first 10 chars (YYYY-MM-DD) from publishAt
-                let released_at = attr["publishAt"]
-                    .as_str()
-                    .filter(|s| s.len() >= 10)
-                    .map(|s| s[..10].to_string());
-
-                let title = attr["title"].as_str().map(|s| s.to_string());
-
-                chapters.push(ChapterData {
-                    number,
-                    title,
-                    url:         format!("{BASE}/chapter/{item_id}"),
-                    released_at,
-                });
-            }
+            chapters.extend(parse_feed_items(items, &mut seen));
 
             // Guard against API responses that wedge the loop: if a page
             // returned no items, we're done regardless of `total`.
@@ -423,5 +431,60 @@ impl MangaDexScraper {
         }
 
         Ok(chapters)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(id: &str, ch: &str, pages: u64, external: Option<&str>) -> serde_json::Value {
+        json!({
+            "id": id,
+            "attributes": {
+                "chapter": ch,
+                "title": null,
+                "pages": pages,
+                "externalUrl": external,
+                "publishAt": "2026-11-01T10:00:00+00:00",
+            }
+        })
+    }
+
+    // --- M5: external / zero-page chapters ---
+
+    #[test]
+    fn feed_skips_external_and_empty_chapters() {
+        let items = vec![
+            item("ext", "120", 0, Some("https://mangaplus.example/viewer/1")),
+            item("ext2", "121", 5, Some("https://publisher.example/c/121")),
+            item("empty", "122", 0, None),
+            item("good", "120", 30, None),
+        ];
+        let mut seen = HashSet::new();
+        let out = parse_feed_items(&items, &mut seen);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].number, 120.0);
+        assert_eq!(out[0].url, format!("{BASE}/chapter/good"));
+        assert_eq!(out[0].released_at.as_deref(), Some("2026-11-01"));
+    }
+
+    #[test]
+    fn feed_keeps_first_readable_entry_per_number_across_pages() {
+        let mut seen = HashSet::new();
+        let a = parse_feed_items(&[item("first", "5", 20, None)], &mut seen);
+        let b = parse_feed_items(&[item("second", "5", 20, None), item("six", "6", 20, None)], &mut seen);
+        assert_eq!(a[0].url, format!("{BASE}/chapter/first"));
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].number, 6.0);
+    }
+
+    #[test]
+    fn feed_tolerates_missing_pages_field() {
+        let mut v = item("nopages", "7", 0, None);
+        v["attributes"].as_object_mut().unwrap().remove("pages");
+        let out = parse_feed_items(&[v], &mut HashSet::new());
+        assert_eq!(out.len(), 1, "absent `pages` is not evidence of an empty chapter");
     }
 }
