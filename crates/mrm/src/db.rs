@@ -669,7 +669,7 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
 /// SQL twin of `scraper::asura::slug_key` over a `source_url` column: last
 /// path segment, trailing `/` ignored, `-hash8` suffix stripped.
 const ASURA_SLUG_SQL: &str =
-    r"regexp_replace(regexp_replace(rtrim(source_url, '/'), '^.*/', ''), '-[0-9a-f]{8}$', '')";
+    r"regexp_replace(regexp_replace(rtrim(regexp_replace(source_url, '[?#].*$', ''), '/'), '^.*/', ''), '-[0-9a-f]{8}$', '')";
 
 /// Insert a discovered entry if not already known in either library or
 /// discoveries. Returns true if a new row was inserted.
@@ -1121,6 +1121,10 @@ pub(crate) mod tests {
         // In the library under the old hash: the rotated URL is not new.
         insert_manhwa_with_chapters(&pool, &series(1, ASURA_OLD), "asura").await.unwrap();
         assert!(!upsert_discovery(&pool, "asura", ASURA_NEW, "SL", None, None, None).await.unwrap());
+        assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
+        // A tracking query on the discovered URL changes nothing.
+        let with_query = format!("{ASURA_NEW}?ref=home");
+        assert!(!upsert_discovery(&pool, "asura", &with_query, "SL", None, None, None).await.unwrap());
         assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
 
         // Dismissed under one hash, re-surfaced under another: stays dismissed.

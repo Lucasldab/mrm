@@ -1931,23 +1931,53 @@ fn open_viewer_log(name: &str) -> Option<std::fs::File> {
 /// Open `name` in the state log directory (0700 dir, 0600 file), truncating
 /// or appending.
 fn open_state_log(name: &str, append: bool) -> Option<std::fs::File> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let dir = viewer_log_dir(
         std::env::var("XDG_STATE_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
-    std::fs::OpenOptions::new()
-        .write(true).create(true).truncate(!append).append(append).mode(0o600)
-        .open(dir.join(name)).ok()
+    open_log_in(&dir, name, append)
 }
+
+/// Open `dir/name` (creating `dir`), forcing 0700 on the directory and 0600 on
+/// the file. `mode()` only applies on creation, so files left by older builds
+/// are tightened here too.
+fn open_log_in(dir: &std::path::Path, name: &str, append: bool) -> Option<std::fs::File> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
+    let _ = std::fs::set_permissions(dir, Permissions::from_mode(0o700));
+    let f = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(!append).append(append).mode(0o600)
+        .open(dir.join(name)).ok()?;
+    let _ = f.set_permissions(Permissions::from_mode(0o600));
+    Some(f)
+}
+
+/// `panic.log` is rotated to `panic.log.old` once it reaches this size, so a
+/// worker that keeps panicking cannot fill the disk.
+const PANIC_LOG_MAX_BYTES: u64 = 256 * 1024;
 
 /// Append `text` to `panic.log` in the state directory. Best effort: used by
 /// the panic hook for panics off the UI thread, which must not touch the
 /// terminal.
 pub(crate) fn append_panic_log(text: &str) {
+    if let Some(dir) = viewer_log_dir(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    ) {
+        append_capped_log(&dir, "panic.log", text, PANIC_LOG_MAX_BYTES);
+    }
+}
+
+/// Append a line to `dir/name`, first moving a file of `max` bytes or more to
+/// `name.old` (replacing the previous one).
+fn append_capped_log(dir: &std::path::Path, name: &str, text: &str, max: u64) {
     use std::io::Write;
-    if let Some(mut f) = open_state_log("panic.log", true) {
+    let path = dir.join(name);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= max) {
+        let _ = std::fs::rename(&path, dir.join(format!("{name}.old")));
+    }
+    if let Some(mut f) = open_log_in(dir, name, true) {
         let _ = writeln!(f, "{text}");
     }
 }
@@ -2110,7 +2140,7 @@ mod join_tests {
 
 #[cfg(test)]
 mod page_ext_tests {
-    use super::{page_extension, viewer_log_dir};
+    use super::{append_capped_log, open_log_in, page_extension, viewer_log_dir};
     use std::path::PathBuf;
 
     #[test]
@@ -2155,6 +2185,42 @@ mod page_ext_tests {
     #[test]
     fn log_dir_none_without_any_base() {
         assert_eq!(viewer_log_dir(None, None), None);
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mrm-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn open_log_in_tightens_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("perms");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("rv.log");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        open_log_in(&dir, "rv.log", false).expect("opens");
+
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn panic_log_rotates_at_the_cap() {
+        let dir = scratch_dir("cap");
+        append_capped_log(&dir, "panic.log", "first", 10);
+        append_capped_log(&dir, "panic.log", "second", 10); // 6 bytes < 10: appended
+        assert_eq!(std::fs::read_to_string(dir.join("panic.log")).unwrap(), "first\nsecond\n");
+        append_capped_log(&dir, "panic.log", "third", 10); // 13 bytes >= 10: rotated
+        assert_eq!(std::fs::read_to_string(dir.join("panic.log")).unwrap(), "third\n");
+        assert_eq!(std::fs::read_to_string(dir.join("panic.log.old")).unwrap(), "first\nsecond\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

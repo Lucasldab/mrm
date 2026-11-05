@@ -286,11 +286,19 @@ fn render_status_line(
     f.render_widget(para, area);
 }
 
+/// Library status-bar hint, built from the configured keys (`D` and `q` are
+/// fixed bindings).
+pub(crate) fn library_hint(keys: &crate::config::KeysConfig) -> String {
+    format!(
+        "{}/{} move  {}/{} row  {} open  {} search  {} add  D discover  {} delete  {} poll  q quit",
+        keys.left, keys.right, keys.down, keys.up, keys.open, keys.search,
+        keys.add, keys.delete, keys.poll_now,
+    )
+}
+
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
-    let msg = app
-        .status_msg
-        .as_deref()
-        .unwrap_or("h/l move  j/k row  Enter open  / search  a add  D discover  d delete  p poll  q quit");
+    let default_hint = library_hint(&app.keys);
+    let msg = app.status_msg.as_deref().unwrap_or(&default_hint);
 
     let bar = Paragraph::new(msg).style(
         Style::default()
@@ -437,5 +445,17 @@ mod tests {
         assert_eq!(status_text(2, "2 new", false), "[2] 2 new");
         assert_eq!(status_text(0, "Reading", true), "⚠ Reading");
         assert_eq!(status_text(2, "2 new", true), "⚠ [2] 2 new");
+    }
+
+    #[test]
+    fn library_hint_follows_rebound_keys() {
+        let keys = crate::config::KeysConfig::default();
+        assert_eq!(
+            library_hint(&keys),
+            "h/l move  j/k row  Enter open  / search  a add  D discover  d delete  p poll  q quit",
+        );
+        let rebound = crate::config::KeysConfig { poll_now: "P".into(), left: "n".into(), ..keys };
+        let hint = library_hint(&rebound);
+        assert!(hint.starts_with("n/l move") && hint.contains("P poll"), "{hint}");
     }
 }

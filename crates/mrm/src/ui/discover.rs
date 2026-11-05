@@ -53,7 +53,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         );
     }
 
-    let hint = " h/l move  j/k row  a/Enter add  x dismiss  Esc back";
+    let keys = &app.keys;
+    let hint = format!(
+        " {}/{} move  {}/{} row  a/{} add  x dismiss  {} back",
+        keys.left, keys.right, keys.down, keys.up, keys.open, keys.back,
+    );
     f.render_widget(
         Paragraph::new(hint).style(
             Style::default().fg(theme_bar_fg).bg(theme_bar_bg),

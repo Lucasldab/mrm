@@ -155,9 +155,11 @@ async fn fetch(client: &rquest::Client, url: &str) -> Result<(String, String)> {
 // Pure-function helpers (parsing — ported 1:1 from asura.py)
 // ---------------------------------------------------------------------------
 
-/// Return the `/comics/{slug}` path component of a series URL.
+/// Return the `/comics/{slug}` path component of a series URL, without any
+/// `?query` or `#fragment`.
 fn series_path(source_url: &str) -> String {
-    let after_scheme = source_url.split_once("://").map(|(_, r)| r).unwrap_or(source_url);
+    let no_query = source_url.split(['?', '#']).next().unwrap_or(source_url);
+    let after_scheme = no_query.split_once("://").map(|(_, r)| r).unwrap_or(no_query);
     let path = match after_scheme.find('/') {
         Some(i) => &after_scheme[i..],
         None    => "/",
@@ -548,6 +550,14 @@ fn urlencoding_minimal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_path_and_slug_ignore_query_and_fragment() {
+        let u = "https://asurascans.com/comics/solo-leveling-1a2b3c4d/?ref=home#top";
+        assert_eq!(series_path(u), "/comics/solo-leveling-1a2b3c4d");
+        assert_eq!(slug_key(u), "solo-leveling");
+        assert_eq!(slug_key("https://asurascans.com/comics/solo-leveling-9f8e7d6c"), "solo-leveling");
+    }
 
     // --- M8: lazy-loaded covers ---
 

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use sqlx::postgres::PgPool;
 use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
@@ -87,6 +88,9 @@ pub async fn coordinator_task(
         // claim already made still gets its push (within stop_coordinator's
         // grace period) instead of being cut off mid-request.
         let _ = poll_all(&pool, &config, &registry, &shutdown, &scraper_tx, quiet).await;
+        // A "poll now" pressed while that poll ran is already answered by it;
+        // drop the stored permit instead of starting a second poll at once.
+        let _ = poll_now.notified().now_or_never();
     }
 }
 
@@ -185,8 +189,12 @@ async fn poll_all(
             Err(e) => {
                 log!("mrm: failed to fetch '{}': {e:#}", manhwa.title);
                 streaks.failed(&manhwa.source);
-                match db::record_poll_failure(pool, manhwa.id, &format!("{e:#}")).await {
-                    Ok(()) => health_changed = true,
+                let msg = format!("{e:#}");
+                match db::record_poll_failure(pool, manhwa.id, &msg).await {
+                    // Reload the TUI only when the ⚠ appears or its text
+                    // changes, not on every poll of a series that stays down.
+                    Ok(()) => health_changed |= manhwa.failing_since.is_none()
+                        || manhwa.last_error.as_deref() != Some(msg.as_str()),
                     Err(db_err) => log!("mrm: could not record failure for '{}': {db_err}", manhwa.title),
                 }
                 continue;
@@ -447,6 +455,24 @@ mod tests {
             .into_iter().filter(|m| m.failing_since.is_some()).collect();
         assert_eq!(failing.len(), SOURCE_FAILURE_LIMIT, "skipped series are not marked failing");
         assert!(failing.iter().all(|m| m.last_error.as_deref() == Some("HTTP 403")));
+    }
+
+    #[tokio::test]
+    async fn a_series_that_stays_down_does_not_reload_the_tui_again() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
+            return;
+        };
+        db::insert_manhwa_with_chapters(&pool, &series(1, "https://x/dead"), "dead").await.unwrap();
+        let mut reg: Registry = Registry::new();
+        reg.insert("dead", Box::new(FailingScraper(Arc::new(Default::default()))));
+        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339()).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(4);
+        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
+        assert!(rx.try_recv().is_ok(), "the first failure shows the ⚠");
+        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
+        assert!(rx.try_recv().is_err(), "same error again: nothing changed for the TUI");
     }
 
     #[tokio::test]
