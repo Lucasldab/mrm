@@ -315,9 +315,10 @@ impl App {
             AppEvent::Tick     => {
                 self.poll_images();
                 if self.viewer_exited {
+                    self.viewer_exited = false;
                     if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
                         // Viewer closed on its own: save progress, back to Detail.
-                        self.save_reader_progress(chapter_id, manhwa_id).await?;
+                        self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
                         self.kill_viewer();
                         self.open_detail(manhwa_id).await?;
                     } else {
@@ -436,9 +437,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
-                if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id).await {
-                    eprintln!("could not save reading progress: {e:#}");
-                }
+                self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
                 self.kill_viewer();
             }
             self.should_quit = true;
@@ -704,15 +703,15 @@ impl App {
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         let k = key.code;
         if k == KeyCode::Esc || k == self.keys.back() {
-            self.save_reader_progress(chapter_id, manhwa_id).await?;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
             self.kill_viewer();
             self.open_detail(manhwa_id).await?;
         } else if k == self.keys.next_chapter() {
-            self.save_reader_progress(chapter_id, manhwa_id).await?;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
             self.kill_viewer();
             self.open_next_chapter(manhwa_id, chapter_id).await?;
         } else if k == self.keys.prev_chapter() {
-            self.save_reader_progress(chapter_id, manhwa_id).await?;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
             self.kill_viewer();
             self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
@@ -1298,6 +1297,14 @@ impl App {
     // Progress tracking
     // -----------------------------------------------------------------------
 
+    /// Save progress; a failure becomes a status message so leaving the
+    /// Reader (and the viewer teardown after it) never depends on the DB.
+    async fn save_reader_progress_nonfatal(&mut self, chapter_id: i64, manhwa_id: i64) {
+        if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id).await {
+            self.set_msg(format!("progress not saved: {e:#}"));
+        }
+    }
+
     /// Mark the chapter read only if the viewer was used and every page loaded.
     async fn save_reader_progress(&mut self, chapter_id: i64, manhwa_id: i64) -> Result<()> {
         if !should_mark_complete(
@@ -1541,12 +1548,14 @@ async fn fetch_chapter_images(
     // Each task returns (index, Option<PathBuf>) — None = this index failed.
     // Reporting the index on failure lets poll_images skip it instead of stalling.
     let mut set: JoinSet<(usize, Option<std::path::PathBuf>)> = JoinSet::new();
+    let mut task_page: std::collections::HashMap<tokio::task::Id, usize> =
+        std::collections::HashMap::new();
 
     for (page, url) in urls.into_iter().enumerate() {
         let client      = client.clone();
         let sem         = sem.clone();
         let session_dir = session_dir.clone();
-        set.spawn(async move {
+        let handle = set.spawn(async move {
             let result = async {
                 let _permit = sem.acquire_owned().await.ok()?;
                 let mut req = client.get(&url);
@@ -1561,21 +1570,21 @@ async fn fetch_chapter_images(
             }.await;
             (page, result)
         });
+        task_page.insert(handle.id(), page);
     }
 
     // Collect results as they complete (streaming, not batch)
     let mut failures = 0usize;
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((page, Some(path))) => {
+    while let Some(joined) = set.join_next_with_id().await {
+        match joined_page_result(joined, &task_page) {
+            (page, Some(path)) => {
                 let _ = tx.send(Some((page, Some(path)))).await;
             }
-            Ok((page, None)) => {
+            (page, None) => {
                 failures += 1;
                 // Report failed index so poll_images can advance past it
                 let _ = tx.send(Some((page, None))).await;
             }
-            Err(_) => { failures += 1; }
         }
     }
 
@@ -1655,5 +1664,43 @@ mod complete_tests {
     #[test]
     fn zero_pages_is_not_complete() {
         assert!(!should_mark_complete(true, true, 0, 0));
+    }
+}
+
+/// Flatten a joined page task into `(page, result)`. A panicked or cancelled
+/// task is reported as a failed page so the received count stays equal to
+/// the real page count.
+fn joined_page_result(
+    joined: Result<(tokio::task::Id, (usize, Option<std::path::PathBuf>)), tokio::task::JoinError>,
+    task_page: &std::collections::HashMap<tokio::task::Id, usize>,
+) -> (usize, Option<std::path::PathBuf>) {
+    match joined {
+        Ok((_, r)) => r,
+        Err(e) => (task_page.get(&e.id()).copied().unwrap_or(usize::MAX), None),
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::joined_page_result;
+    use std::collections::HashMap;
+    use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn panicked_page_is_reported_as_failed_page() {
+        let mut set: JoinSet<(usize, Option<std::path::PathBuf>)> = JoinSet::new();
+        let mut map = HashMap::new();
+        let h = set.spawn(async { (0usize, Some(std::path::PathBuf::from("a"))) });
+        map.insert(h.id(), 0usize);
+        let h = set.spawn(async { panic!("boom") });
+        map.insert(h.id(), 1usize);
+        let mut got = Vec::new();
+        while let Some(j) = set.join_next_with_id().await {
+            got.push(joined_page_result(j, &map));
+        }
+        got.sort_by_key(|(p, _)| *p);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].1.is_some());
+        assert_eq!(got[1], (1, None));
     }
 }
