@@ -3482,7 +3482,6 @@ dependencies = [
  "flate2",
  "icy_sixel",
  "image",
- "pkg-config",
  "rand 0.8.5",
  "ratatui",
  "rustix 0.38.44",
