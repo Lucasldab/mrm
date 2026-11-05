@@ -789,7 +789,11 @@ impl App {
         // and the series may have been deleted.
         let old_pub_status = match db::fetch_manhwa(&self.pool, manhwa_id).await {
             Ok(m)  => m.pub_status,
-            Err(_) => { self.set_msg("Refresh skipped: series no longer in library"); return Ok(()); }
+            Err(e) if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) => {
+                self.set_msg("Refresh skipped: series no longer in library");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         };
         let new_chapters = db::apply_poll_result(&self.pool, manhwa_id, &series, &old_pub_status).await?;
         db::update_manhwa_metadata(&self.pool, manhwa_id, &series).await?;
@@ -2307,6 +2311,27 @@ mod task_tests {
         app.reload_manhwa().await.unwrap();
         assert_eq!(app.library_sel, 2);
         assert_eq!(app.selected_manhwa_id(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn refresh_of_a_deleted_series_says_so() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let s = crate::db::tests::series(1, "https://x/gone");
+        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        crate::db::delete_manhwa(&app.pool, id).await.unwrap();
+        app.handle_event(AppEvent::RefreshDone { manhwa_id: id, result: Ok(s) }).await.unwrap();
+        assert_eq!(app.status_msg.as_deref(), Some("Refresh skipped: series no longer in library"));
+    }
+
+    #[tokio::test]
+    async fn refresh_db_error_is_not_mislabelled_as_deleted() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let s = crate::db::tests::series(1, "https://x/dberr");
+        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        app.pool.close().await;
+        let r = app.handle_event(AppEvent::RefreshDone { manhwa_id: id, result: Ok(s) }).await;
+        assert!(r.is_err(), "a database failure must propagate");
+        assert_ne!(app.status_msg.as_deref(), Some("Refresh skipped: series no longer in library"));
     }
 
     #[tokio::test]
