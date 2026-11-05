@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, CheckStatus, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -134,7 +134,7 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.error_for_status()
+            let r = r.check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -179,7 +179,7 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.error_for_status()
+            let r = r.check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -216,7 +216,7 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.error_for_status()
+            let r = r.check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -271,7 +271,7 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.error_for_status()
+            let r = r.check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await

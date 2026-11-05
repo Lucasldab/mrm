@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, CheckStatus, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -138,7 +138,7 @@ async fn fetch(client: &rquest::Client, url: &str) -> Result<(String, String)> {
             .send()
             .await
             .with_context(|| format!("Asura GET {url} failed"))?
-            .error_for_status()
+            .check_status()
             .with_context(|| format!("Asura GET {url} returned HTTP error"))?;
         let final_url = resp.url().to_string();
         let body = resp

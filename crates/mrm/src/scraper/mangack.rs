@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::{ChapterData, DiscoveryEntry, Scraper, SearchResult, SeriesData};
+use super::{ChapterData, CheckStatus, DiscoveryEntry, Scraper, SearchResult, SeriesData};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,7 +141,7 @@ impl Scraper for MangackScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaCK GET {url}?s={query} failed"))?
-                .error_for_status()
+                .check_status()
                 .with_context(|| format!("MangaCK GET {url}?s={query} returned HTTP error"))?;
             r.text()
                 .await
@@ -167,7 +167,7 @@ impl Scraper for MangackScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaCK GET {url} failed"))?
-                .error_for_status()
+                .check_status()
                 .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await
@@ -197,7 +197,7 @@ impl Scraper for MangackScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaCK GET {url} failed"))?
-                .error_for_status()
+                .check_status()
                 .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await
@@ -223,7 +223,7 @@ impl Scraper for MangackScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaCK GET {url} failed"))?
-                .error_for_status()
+                .check_status()
                 .with_context(|| format!("MangaCK GET {url} returned HTTP error"))?;
             r.text()
                 .await

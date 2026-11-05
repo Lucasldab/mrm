@@ -167,35 +167,170 @@ pub(crate) fn img_url(img: &scraper::ElementRef<'_>) -> Option<String> {
 // Retry helper
 // ---------------------------------------------------------------------------
 
-/// Retry an async closure up to 3 times with exponential backoff: 1s, 2s, 4s.
+/// Longest `Retry-After` we wait inside one fetch; anything longer fails this
+/// attempt and the next poll tries again.
+pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// A non-success HTTP status, with the server's `Retry-After` when it sent
+/// one. Scrapers produce it via [`check_reqwest`] / [`check_rquest`] so the
+/// retry classifier sees the header, which `error_for_status` drops.
+#[derive(Debug)]
+pub(crate) struct HttpStatus {
+    pub status:      u16,
+    pub retry_after: Option<Duration>,
+}
+
+impl HttpStatus {
+    pub(crate) fn new(status: u16, retry_after: Option<&str>) -> Self {
+        Self { status, retry_after: retry_after.and_then(|v| parse_retry_after(v, chrono::Utc::now())) }
+    }
+}
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
+/// `Retry-After` is either delta-seconds or an HTTP-date.
+pub(crate) fn parse_retry_after(v: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let v = v.trim();
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(v).ok()?.to_utc();
+    Some((at - now).to_std().unwrap_or(Duration::ZERO))
+}
+
+/// `error_for_status` for reqwest that keeps `Retry-After`.
+pub(crate) fn check_reqwest(resp: reqwest::Response) -> std::result::Result<reqwest::Response, HttpStatus> {
+    let st = resp.status();
+    if st.is_client_error() || st.is_server_error() {
+        let ra = resp.headers().get("retry-after").and_then(|v| v.to_str().ok());
+        return Err(HttpStatus::new(st.as_u16(), ra));
+    }
+    Ok(resp)
+}
+
+/// `error_for_status` for rquest (Asura) that keeps `Retry-After`.
+pub(crate) fn check_rquest(resp: rquest::Response) -> std::result::Result<rquest::Response, HttpStatus> {
+    let st = resp.status();
+    if st.is_client_error() || st.is_server_error() {
+        let ra = resp.headers().get("retry-after").and_then(|v| v.to_str().ok());
+        return Err(HttpStatus::new(st.as_u16(), ra));
+    }
+    Ok(resp)
+}
+
+/// `.check_status()` on either client's response: [`check_reqwest`] /
+/// [`check_rquest`] in method position, a drop-in for `error_for_status`.
+pub(crate) trait CheckStatus: Sized {
+    fn check_status(self) -> std::result::Result<Self, HttpStatus>;
+}
+
+impl CheckStatus for reqwest::Response {
+    fn check_status(self) -> std::result::Result<Self, HttpStatus> { check_reqwest(self) }
+}
+
+impl CheckStatus for rquest::Response {
+    fn check_status(self) -> std::result::Result<Self, HttpStatus> { check_rquest(self) }
+}
+
+/// What [`retry`] does after a failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryDecision {
+    /// Permanent (4xx other than 429, parse/decode errors, anything unknown).
+    Fail,
+    /// Transient: wait the usual backoff step.
+    Backoff,
+    /// Transient, and the server said how long to wait (capped).
+    After(Duration),
+}
+
+fn classify_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
+    if status == 429 || (500..600).contains(&status) {
+        match retry_after {
+            Some(d) => RetryDecision::After(d.min(MAX_RETRY_AFTER)),
+            None    => RetryDecision::Backoff,
+        }
+    } else {
+        RetryDecision::Fail
+    }
+}
+
+/// Retry only what can succeed on a second try: timeouts, connection
+/// errors, 429 and 5xx. 4xx and parse errors fail at once.
+pub(crate) fn classify(err: &anyhow::Error) -> RetryDecision {
+    for cause in err.chain() {
+        if let Some(h) = cause.downcast_ref::<HttpStatus>() {
+            return classify_status(h.status, h.retry_after);
+        }
+        if let Some(e) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(st) = e.status() {
+                return classify_status(st.as_u16(), None);
+            }
+            return if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() {
+                RetryDecision::Backoff
+            } else {
+                RetryDecision::Fail
+            };
+        }
+        if let Some(e) = cause.downcast_ref::<rquest::Error>() {
+            if let Some(st) = e.status() {
+                return classify_status(st.as_u16(), None);
+            }
+            return if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() {
+                RetryDecision::Backoff
+            } else {
+                RetryDecision::Fail
+            };
+        }
+    }
+    RetryDecision::Fail
+}
+
+const BACKOFF: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+
+/// Up to 3 attempts with 1 s, 2 s backoff (or the server's `Retry-After`,
+/// capped at 60 s), but only for errors [`classify`] calls transient.
 ///
-/// Returns the first Ok result, or the last Err if all attempts fail.
+/// Returns the first Ok result, or the error that ended the attempts.
 ///
 /// # Example
 /// ```rust,ignore
 /// let resp = retry(|| client.get(url).send()).await?;
 /// ```
-pub async fn retry<F, Fut, T>(mut f: F) -> Result<T>
+pub async fn retry<F, Fut, T>(f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let delays = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
-    let mut last_err = None;
+    retry_with(&BACKOFF, f).await
+}
 
-    for (attempt, delay) in delays.iter().enumerate() {
-        match f().await {
+async fn retry_with<F, Fut, T>(delays: &[Duration], mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0;
+    loop {
+        let err = match f().await {
             Ok(val) => return Ok(val),
-            Err(e) => {
-                last_err = Some(e);
-                if attempt < delays.len() - 1 {
-                    tokio::time::sleep(*delay).await;
-                }
-            }
+            Err(e)  => e,
+        };
+        attempt += 1;
+        if attempt >= delays.len() {
+            return Err(err);
+        }
+        match classify(&err) {
+            RetryDecision::Fail     => return Err(err),
+            RetryDecision::Backoff  => tokio::time::sleep(delays[attempt - 1]).await,
+            RetryDecision::After(d) => tokio::time::sleep(d).await,
         }
     }
-
-    Err(last_err.expect("delays is non-empty"))
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +419,144 @@ mod tests {
         );
         assert_eq!(first_img(r#"<img src="https://c/4.png">"#), Some("https://c/4.png".into()));
         assert_eq!(first_img(r#"<img src="data:image/gif;base64,R0" data-src=" ">"#), None);
+    }
+
+    // --- M9: retry classification ---
+
+    fn status(code: u16, retry_after: Option<&str>) -> anyhow::Error {
+        anyhow::Error::new(HttpStatus::new(code, retry_after)).context("GET https://x failed")
+    }
+
+    #[test]
+    fn client_errors_and_parse_errors_fail_immediately() {
+        assert_eq!(classify(&status(404, None)), RetryDecision::Fail);
+        assert_eq!(classify(&status(403, None)), RetryDecision::Fail);
+        assert_eq!(classify(&status(400, Some("5"))), RetryDecision::Fail);
+        assert_eq!(classify(&anyhow::anyhow!("Asura: no <h1> title")), RetryDecision::Fail);
+    }
+
+    #[test]
+    fn server_errors_back_off() {
+        assert_eq!(classify(&status(500, None)), RetryDecision::Backoff);
+        assert_eq!(classify(&status(502, None)), RetryDecision::Backoff);
+        assert_eq!(classify(&status(503, Some("7"))), RetryDecision::After(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn too_many_requests_honours_retry_after_capped() {
+        assert_eq!(classify(&status(429, None)), RetryDecision::Backoff);
+        assert_eq!(classify(&status(429, Some("5"))), RetryDecision::After(Duration::from_secs(5)));
+        assert_eq!(classify(&status(429, Some("3600"))), RetryDecision::After(MAX_RETRY_AFTER));
+        assert_eq!(classify(&status(429, Some("garbage"))), RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn retry_after_http_date() {
+        let now = chrono::DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT").unwrap().to_utc();
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:10 GMT", now),
+            Some(Duration::from_secs(10)),
+        );
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:27:00 GMT", now), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after(" 12 ", now), Some(Duration::from_secs(12)));
+        assert_eq!(parse_retry_after("soon", now), None);
+    }
+
+    /// A local port with nothing listening (bind, read the port, close).
+    fn closed_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Serve one canned raw HTTP response per connection on a local port.
+    async fn serve(raw: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(raw.as_bytes()).await;
+            }
+        });
+        port
+    }
+
+    /// Accept connections and never answer.
+    async fn silent() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = l.accept().await { held.push(sock); }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_errors_back_off_and_decode_errors_fail() {
+        let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build().unwrap();
+
+        let e = client.get(format!("http://127.0.0.1:{}/", closed_port())).send().await.unwrap_err();
+        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff, "connection refused");
+
+        let e = client.get(format!("http://127.0.0.1:{}/", silent().await)).send().await.unwrap_err();
+        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff, "timeout");
+
+        let port = serve("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc").await;
+        let resp = client.get(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
+        let e = resp.json::<serde_json::Value>().await.unwrap_err();
+        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Fail, "JSON decode");
+    }
+
+    #[tokio::test]
+    async fn status_checks_carry_retry_after_for_both_clients() {
+        let port = serve("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 9\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        let url = format!("http://127.0.0.1:{port}/");
+
+        let resp = reqwest::get(&url).await.unwrap();
+        let e = anyhow::Error::new(check_reqwest(resp).unwrap_err());
+        assert_eq!(classify(&e), RetryDecision::After(Duration::from_secs(9)));
+
+        let resp = rquest::Client::new().get(&url).send().await.unwrap();
+        let e = anyhow::Error::new(check_rquest(resp).unwrap_err());
+        assert_eq!(classify(&e), RetryDecision::After(Duration::from_secs(9)));
+    }
+
+    #[tokio::test]
+    async fn rquest_connection_refused_backs_off() {
+        let client = rquest::Client::builder().timeout(Duration::from_millis(200)).build().unwrap();
+        let e = client.get(format!("http://127.0.0.1:{}/", closed_port())).send().await.unwrap_err();
+        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff);
+    }
+
+    #[tokio::test]
+    async fn retry_stops_on_permanent_errors_and_retries_transient_ones() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let delays = [Duration::ZERO; 3];
+
+        let calls = AtomicUsize::new(0);
+        let r: Result<()> = retry_with(&delays, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(status(404, None))
+        }).await;
+        assert!(r.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "404 must not be retried");
+
+        let calls = AtomicUsize::new(0);
+        let r: Result<()> = retry_with(&delays, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(status(503, None))
+        }).await;
+        assert!(r.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "503 is retried up to the attempt limit");
+
+        let calls = AtomicUsize::new(0);
+        let r = retry_with(&delays, || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 { Err(status(500, None)) } else { Ok(7) }
+        }).await;
+        assert_eq!(r.unwrap(), 7);
     }
 
     #[test]
