@@ -9,6 +9,7 @@ mod scraper;
 mod types;
 mod ui;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -20,7 +21,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 use app::App;
@@ -120,24 +121,33 @@ async fn main() -> Result<()> {
 async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     eprintln!("mrm: daemon mode — polling every {} minutes", config.notifications.poll_interval_minutes);
     eprintln!("mrm: press Ctrl-C to stop");
+    warn_unknown_sources(&config);
 
     let shutdown = CancellationToken::new();
-    let shutdown_c = shutdown.clone();
+    let registry = Arc::new(scraper::build_registry(&config));
+    // Nobody reads coordinator events in daemon mode: drop the receiver so
+    // sends fail fast instead of blocking once the buffer fills.
+    let (tx, _) = mpsc::channel::<ScraperEvent>(1);
 
-    // Handle Ctrl-C gracefully
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        eprintln!("\nmrm: shutting down...");
-        shutdown_c.cancel();
-    });
+    let handle = tokio::spawn(scraper::coordinator_task(
+        pool, config, registry, shutdown.clone(), Arc::new(Notify::new()), tx, false,
+    ));
 
-    let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
-
-    // Run coordinator directly (not as a spawned task — this IS the main task)
-    scraper::coordinator_task(pool, config, shutdown, _tx, false).await;
+    let _ = tokio::signal::ctrl_c().await;
+    eprintln!("\nmrm: shutting down...");
+    scraper::stop_coordinator(&shutdown, handle, COORDINATOR_STOP_GRACE).await;
 
     eprintln!("mrm: daemon stopped");
     Ok(())
+}
+
+/// How long quitting waits for an in-flight poll before aborting it.
+const COORDINATOR_STOP_GRACE: Duration = Duration::from_secs(2);
+
+fn warn_unknown_sources(config: &config::Config) {
+    for name in scraper::unknown_sources(config) {
+        eprintln!("mrm: unknown source '{name}' in config, skipping");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,11 +157,8 @@ async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
 async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     eprintln!("mrm: single poll...");
 
-    let (_tx, mut _rx) = mpsc::channel::<ScraperEvent>(32);
-    let _shutdown = CancellationToken::new();
-
-    // Build scraper registry
-    let registry = build_registry_for_once(&config);
+    warn_unknown_sources(&config);
+    let registry = scraper::build_registry(&config);
 
     let manhwa_list = db::fetch_all_manhwa(&pool).await?;
     eprintln!("mrm: checking {} manhwa", manhwa_list.len());
@@ -230,23 +237,6 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     Ok(())
 }
 
-fn build_registry_for_once(config: &config::Config) -> std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> {
-    use scraper::{AsuraScraper, MangaDexScraper, MangackScraper};
-    let mut registry: std::collections::HashMap<&'static str, Box<dyn scraper::Scraper>> = std::collections::HashMap::new();
-
-    for (name, source_cfg) in &config.sources {
-        if !source_cfg.enabled { continue; }
-        match name.as_str() {
-            "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
-            "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
-            "asura"    => { registry.insert("asura", Box::new(AsuraScraper::new())); }
-            _ => {}
-        }
-    }
-
-    registry
-}
-
 // ---------------------------------------------------------------------------
 // TUI mode (default)
 // ---------------------------------------------------------------------------
@@ -283,15 +273,8 @@ async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     startup_cleanup_tmp();
 
     let (scraper_tx, scraper_rx) = mpsc::channel::<ScraperEvent>(32);
+    let (app_tx, app_rx) = mpsc::unbounded_channel::<AppEvent>();
     let shutdown = CancellationToken::new();
-
-    let coordinator_handle = {
-        let pool_c     = pool.clone();
-        let cfg        = config.clone();
-        let shutdown_c = shutdown.clone();
-        let tx_c       = scraper_tx.clone();
-        tokio::spawn(scraper::coordinator_task(pool_c, cfg, shutdown_c, tx_c, true))
-    };
 
     let picker = {
         let p = ratatui_image::picker::Picker::from_query_stdio()
@@ -301,10 +284,22 @@ async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
         Some(p)
     };
 
-    let mut app = match App::new(pool, picker, config).await {
+    let coordinator_config = config.clone();
+    let mut app = match App::new(pool.clone(), picker, config, app_tx).await {
         Ok(a) => a,
         Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
     };
+
+    // The coordinator shares the App's registry and poll-now handle.
+    let coordinator_handle = tokio::spawn(scraper::coordinator_task(
+        pool,
+        coordinator_config,
+        app.registry.clone(),
+        shutdown.clone(),
+        app.poll_now.clone(),
+        scraper_tx,
+        true,
+    ));
 
     // Spawn background cover image preload
     {
@@ -333,13 +328,12 @@ async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut app, scraper_rx).await;
+    let result = run_loop(&mut terminal, &mut app, scraper_rx, app_rx).await;
 
     // Restore the terminal before anything else, even on error.
     drop(guard);
 
-    shutdown.cancel();
-    let _ = coordinator_handle.await;
+    scraper::stop_coordinator(&shutdown, coordinator_handle, COORDINATOR_STOP_GRACE).await;
 
     result
 }
@@ -356,6 +350,7 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     mut scraper_rx: mpsc::Receiver<ScraperEvent>,
+    mut app_rx: mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -377,6 +372,12 @@ async fn run_loop(
             msg = scraper_rx.recv() => {
                 if let Some(ev) = msg {
                     dispatch(app, AppEvent::ScraperMsg(ev)).await;
+                }
+            }
+
+            msg = app_rx.recv() => {
+                if let Some(ev) = msg {
+                    dispatch(app, ev).await;
                 }
             }
 

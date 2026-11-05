@@ -7,9 +7,13 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use sqlx::postgres::PgPool;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+
+use tokio::sync::{mpsc, Notify};
+use tokio::task::JoinHandle;
 
 use crate::cover_cache::CoverCache;
+use crate::scraper::{Registry, SearchResult, SeriesData};
 use crate::types::{AppEvent, Chapter, Discovery, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
@@ -174,6 +178,21 @@ pub struct App {
     pub add_search_loading:      bool,
     pub add_search_error:        Option<String>,
     pub add_search_input_active: bool,  // true = typing mode, false = browsing results
+    /// Identifies the in-flight search so cancelled/stale results are dropped.
+    pub search_job:              SearchJob,
+    /// The spawned search task, aborted on Esc.
+    search_task:                 Option<JoinHandle<()>>,
+
+    /// Manhwa id whose Detail refresh (`R`) is in flight.
+    pub refreshing: Option<i64>,
+
+    /// The process's scraper registry (enabled sources only), shared with
+    /// spawned tasks and the coordinator.
+    pub registry: Arc<Registry>,
+    /// Wakes the coordinator to poll immediately (Library `poll_now` key).
+    pub poll_now: Arc<Notify>,
+    /// Spawned network tasks report back through here into `handle_event`.
+    app_tx: mpsc::UnboundedSender<AppEvent>,
 
     // Delete confirmation
     pub confirm_delete_id: Option<i64>,  // Some(id) = waiting for confirmation keypress
@@ -214,8 +233,14 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(pool: PgPool, picker: Option<Picker>, config: crate::config::Config) -> Result<Self> {
+    pub async fn new(
+        pool: PgPool,
+        picker: Option<Picker>,
+        config: crate::config::Config,
+        app_tx: mpsc::UnboundedSender<AppEvent>,
+    ) -> Result<Self> {
         let manhwa_list = db::fetch_all_manhwa(&pool).await?;
+        let registry = Arc::new(crate::scraper::build_registry(&config));
 
         Ok(Self {
             pool,
@@ -266,6 +291,12 @@ impl App {
             add_search_loading:      false,
             add_search_error:        None,
             add_search_input_active: true,
+            search_job:              SearchJob::default(),
+            search_task:             None,
+            refreshing:              None,
+            registry,
+            poll_now:                Arc::new(Notify::new()),
+            app_tx,
             confirm_delete_id:       None,
             cover_cache:             CoverCache::new(),
             picker,
@@ -388,6 +419,16 @@ impl App {
                 self.cover_cache.reload_from_disk(&self.manhwa_list);
             }
             AppEvent::ScraperMsg(ev) => self.handle_scraper_event(ev).await?,
+            AppEvent::SearchDone { seq, results, errors } => {
+                self.on_search_done(seq, results, errors);
+            }
+            AppEvent::AddDone { source, result } => self.on_add_done(source, result).await?,
+            AppEvent::RefreshDone { manhwa_id, result } => {
+                self.on_refresh_done(manhwa_id, result).await?;
+            }
+            AppEvent::DiscoveryAddDone { discovery_id, source, result } => {
+                self.on_discovery_add_done(discovery_id, source, result).await?;
+            }
         }
         Ok(())
     }
@@ -570,6 +611,9 @@ impl App {
             self.refresh_discoveries().await?;
             self.discover_sel = 0;
             self.screen = Screen::Discover;
+        } else if k == self.keys.poll_now() {
+            self.poll_now.notify_one();
+            self.set_msg("Checking sources for new chapters...");
         } else if k == self.keys.sort() {
             self.sort_mode = self.sort_mode.next();
             self.library_sel = 0;
@@ -657,40 +701,57 @@ impl App {
                 self.open_reader(manhwa_id, chapter_id).await?;
             }
         } else if k == KeyCode::Char('R') {
-            self.do_refresh_metadata(manhwa_id).await?;
+            self.do_refresh_metadata(manhwa_id);
         }
         Ok(())
     }
 
-    /// Re-fetch series metadata from the source and persist title/cover/
-    /// pub_status/description. Triggered by `R` on the detail screen.
-    pub async fn do_refresh_metadata(&mut self, manhwa_id: i64) -> Result<()> {
-        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
-
+    /// Start a re-fetch of the series from its source (`R` on the detail
+    /// screen). The result arrives as `AppEvent::RefreshDone`.
+    pub fn do_refresh_metadata(&mut self, manhwa_id: i64) {
+        if self.refreshing.is_some() {
+            self.set_msg("Refresh already running");
+            return;
+        }
         let (source, source_url) = match self.current_manhwa.as_ref() {
             Some(m) => (m.source.clone(), m.source_url.clone()),
-            None    => return Ok(()),
+            None    => return,
         };
+        if !self.registry.contains_key(source.as_str()) {
+            self.set_msg(source_unavailable(&source));
+            return;
+        }
+        self.refreshing = Some(manhwa_id);
+        self.spawn_series_fetch(source, source_url, move |result| {
+            AppEvent::RefreshDone { manhwa_id, result }
+        });
+    }
 
-        self.set_msg("Refreshing metadata...");
-
-        let scraper: Box<dyn Scraper> = match source.as_str() {
-            "mangadex" => Box::new(MangaDexScraper::new()),
-            "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new()),
-            other => {
-                self.set_msg(format!("Unknown source: {other}"));
-                return Ok(());
-            }
-        };
-
-        let series = match scraper.get_series(&source_url).await {
+    /// Persist a refresh: new chapters through the poll write path (quiet,
+    /// never claims), then title/cover/pub_status/description.
+    async fn on_refresh_done(
+        &mut self,
+        manhwa_id: i64,
+        result: std::result::Result<SeriesData, String>,
+    ) -> Result<()> {
+        if self.refreshing == Some(manhwa_id) {
+            self.refreshing = None;
+        }
+        let series = match result {
             Ok(s)  => s,
             Err(e) => { self.set_msg(format!("Refresh failed: {e}")); return Ok(()); }
         };
-
+        // Fresh pub_status from the DB: a poll may have changed it meanwhile,
+        // and the series may have been deleted.
+        let old_pub_status = match db::fetch_manhwa(&self.pool, manhwa_id).await {
+            Ok(m)  => m.pub_status,
+            Err(_) => { self.set_msg("Refresh skipped: series no longer in library"); return Ok(()); }
+        };
+        let new_chapters = db::apply_poll_result(&self.pool, manhwa_id, &series, &old_pub_status).await?;
         db::update_manhwa_metadata(&self.pool, manhwa_id, &series).await?;
-        self.refresh_detail(manhwa_id).await?;
+        if self.screen == (Screen::Detail { manhwa_id }) {
+            self.refresh_detail(manhwa_id).await?;
+        }
         self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
 
         // Re-pull cover so any new artwork shows up — invalidate cached
@@ -704,8 +765,29 @@ impl App {
             vec![(manhwa_id, series.cover_url.clone())],
         ));
 
-        self.set_msg("Metadata refreshed");
+        self.set_msg(match new_chapters {
+            0 => "Refreshed — no new chapters".to_string(),
+            n => format!("Refreshed — {n} new chapter(s)"),
+        });
         Ok(())
+    }
+
+    /// Fetch `source_url` with the registry's scraper on a spawned task and
+    /// send `done(result)` back to the event loop. Callers check that the
+    /// source is in the registry first, so the UI can say so synchronously.
+    fn spawn_series_fetch<F>(&self, source: String, source_url: String, done: F)
+    where
+        F: FnOnce(std::result::Result<SeriesData, String>) -> AppEvent + Send + 'static,
+    {
+        let registry = self.registry.clone();
+        let tx = self.app_tx.clone();
+        tokio::spawn(async move {
+            let result = match registry.get(source.as_str()) {
+                Some(scraper) => scraper.get_series(&source_url).await.map_err(|e| e.to_string()),
+                None          => Err(source_unavailable(&source)),
+            };
+            let _ = tx.send(done(result));
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -761,8 +843,15 @@ impl App {
     }
 
     async fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.add_search_loading { return Ok(()); }
         let k = key.code;
+        if self.add_search_loading {
+            // Only a running search can be cancelled; an add is a write and
+            // finishes on its own.
+            if (k == KeyCode::Esc || k == self.keys.back()) && self.cancel_search() {
+                self.set_msg("Search cancelled");
+            }
+            return Ok(());
+        }
 
         if self.add_search_input_active {
             if k == KeyCode::Esc || k == self.keys.back() {
@@ -772,7 +861,7 @@ impl App {
                 self.search_cover_protocols.clear();
                 self.add_search_input_active = true;
             } else if k == KeyCode::Enter || k == self.keys.open() {
-                self.search_all_scrapers().await?;
+                self.start_search();
             } else if k == KeyCode::Backspace {
                 self.add_search_query.pop();
             } else if let KeyCode::Char(c) = k {
@@ -800,7 +889,7 @@ impl App {
             } else if k == self.keys.bottom() {
                 self.add_search_sel = count.saturating_sub(1);
             } else if k == KeyCode::Enter || k == self.keys.open() {
-                self.do_add_manhwa().await?;
+                self.do_add_manhwa();
             }
         }
         Ok(())
@@ -836,7 +925,7 @@ impl App {
             self.discover_sel = count.saturating_sub(1);
         } else if k == KeyCode::Char('a') || k == KeyCode::Enter || k == self.keys.open() {
             if count > 0 {
-                self.do_add_discovery().await?;
+                self.do_add_discovery();
             }
         } else if k == KeyCode::Char('x') {
             if count > 0 {
@@ -846,50 +935,48 @@ impl App {
         Ok(())
     }
 
-    /// Fan out search() to both scrapers concurrently, merge results.
-    /// Updates add_search_results and clears add_search_loading on completion.
-    pub async fn search_all_scrapers(&mut self) -> Result<()> {
-        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
+    /// Start a search across every enabled source on a spawned task. The
+    /// result arrives as `AppEvent::SearchDone`; Esc cancels it meanwhile.
+    pub fn start_search(&mut self) {
         let query = self.add_search_query.clone();
         if query.trim().is_empty() {
             self.add_search_results.clear();
-            return Ok(());
+            return;
         }
-
+        self.cancel_search();
+        let seq = self.search_job.start();
         self.add_search_loading = true;
         self.add_search_error   = None;
         self.add_search_results.clear();
+        self.search_cover_protocols.clear();
 
-        let mdx   = MangaDexScraper::new();
-        let mck   = MangackScraper::new();
-        let asura = AsuraScraper::new();
+        let registry = self.registry.clone();
+        let tx = self.app_tx.clone();
+        self.search_task = Some(tokio::spawn(async move {
+            let (results, errors) = search_registry(&registry, &query).await;
+            let _ = tx.send(AppEvent::SearchDone { seq, results, errors });
+        }));
+    }
 
-        // Run all searches concurrently; surface errors as status, not crash
-        let (mdx_res, mck_res, asura_res) = tokio::join!(
-            mdx.search(&query),
-            mck.search(&query),
-            asura.search(&query),
-        );
+    /// Abort the running search, if any. Returns whether one was running.
+    fn cancel_search(&mut self) -> bool {
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+        let was_running = self.search_job.cancel();
+        if was_running {
+            self.add_search_loading = false;
+        }
+        was_running
+    }
 
-        let mut merged = Vec::new();
-        let mut errors = Vec::new();
-        match mdx_res {
-            Ok(r)  => merged.extend(r),
-            Err(e) => errors.push(format!("MangaDex: {e}")),
+    fn on_search_done(&mut self, seq: u64, results: Vec<SearchResult>, errors: Vec<String>) {
+        if !self.search_job.finish(seq) {
+            return; // cancelled or superseded
         }
-        match mck_res {
-            Ok(r)  => merged.extend(r),
-            Err(e) => errors.push(format!("MangaCK: {e}")),
-        }
-        match asura_res {
-            Ok(r)  => merged.extend(r),
-            Err(e) => errors.push(format!("Asura: {e}")),
-        }
-        if !errors.is_empty() {
-            self.add_search_error = Some(errors.join("  "));
-        }
-
-        self.add_search_results = merged;
+        self.search_task = None;
+        self.add_search_error = if errors.is_empty() { None } else { Some(errors.join("  ")) };
+        self.add_search_results = results;
         self.add_search_sel     = 0;
         self.add_search_loading = false;
         self.add_search_input_active = false;  // move focus to results grid
@@ -905,14 +992,11 @@ impl App {
                 preload,
             ));
         }
-        Ok(())
     }
 
-    /// Fetch full series data for the selected search result and insert into DB.
-    pub async fn do_add_manhwa(&mut self) -> Result<()> {
-        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
-        use crate::db;
-
+    /// Start fetching the selected search result's full series; the insert
+    /// happens in `on_add_done`.
+    pub fn do_add_manhwa(&mut self) {
         let result = match self.add_search_results.get(self.add_search_sel) {
             Some(r) => r.clone(),
             None    => {
@@ -920,34 +1004,37 @@ impl App {
                     "No result selected. Run a search and pick a result before pressing Enter."
                         .into(),
                 );
-                return Ok(());
+                return;
             }
         };
+        if !self.registry.contains_key(result.source.as_str()) {
+            self.add_search_error = Some(source_unavailable(&result.source));
+            return;
+        }
 
         self.add_search_loading = true;
         self.add_search_error   = None;
+        let source = result.source.clone();
+        self.spawn_series_fetch(result.source, result.source_url, move |result| {
+            AppEvent::AddDone { source, result }
+        });
+    }
 
-        let scraper: Box<dyn Scraper> = match result.source.as_str() {
-            "mangadex" => Box::new(MangaDexScraper::new()),
-            "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new()),
-            other      => {
-                self.add_search_error = Some(format!("Unknown source: {other}"));
-                self.add_search_loading = false;
-                return Ok(());
-            }
-        };
-
-        let series = match scraper.get_series(&result.source_url).await {
+    async fn on_add_done(
+        &mut self,
+        source: String,
+        result: std::result::Result<SeriesData, String>,
+    ) -> Result<()> {
+        self.add_search_loading = false;
+        let series = match result {
             Ok(s)  => s,
             Err(e) => {
-                self.add_search_error   = Some(format!("Fetch failed: {e}"));
-                self.add_search_loading = false;
+                self.add_search_error = Some(format!("Fetch failed: {e}"));
                 return Ok(());
             }
         };
 
-        match db::insert_manhwa_with_chapters(&self.pool, &series, &result.source).await {
+        match db::insert_manhwa_with_chapters(&self.pool, &series, &source).await {
             Ok(new_id) => {
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
                 // Kick off cover download for the newly added entry so it
@@ -956,22 +1043,22 @@ impl App {
                     self.cover_cache.cache_dir().clone(),
                     vec![(new_id, series.cover_url.clone())],
                 ));
-                self.add_search_loading = false;
                 self.set_msg(format!("Added: {}", series.title));
-                // Reset search state and return to library
-                self.add_search_query   = String::new();
-                self.add_search_results = Vec::new();
-                self.add_search_sel     = 0;
-                self.add_search_input_active = true;
-                self.search_cover_protocols.clear();
-                self.screen = crate::types::Screen::Library;
+                // Reset search state and return to library (only if the user
+                // is still on the Search screen).
+                if self.screen == Screen::Search {
+                    self.add_search_query   = String::new();
+                    self.add_search_results = Vec::new();
+                    self.add_search_sel     = 0;
+                    self.add_search_input_active = true;
+                    self.search_cover_protocols.clear();
+                    self.screen = Screen::Library;
+                }
             }
             Err(e) => {
-                self.add_search_error   = Some(e.to_string());
-                self.add_search_loading = false;
+                self.add_search_error = Some(e.to_string());
             }
         }
-
         Ok(())
     }
 
@@ -1003,6 +1090,7 @@ impl App {
         if let Some(ch) = &self.current_chapter {
             let source = self.current_manhwa.as_ref()
                 .map(|m| m.source.clone()).unwrap_or_default();
+            let registry = self.registry.clone();
             let url = ch.url.clone();
             let (tx, rx) = mpsc::channel::<Option<(usize, Option<std::path::PathBuf>)>>(32);
             let (err_tx, err_rx) = mpsc::channel::<String>(4);
@@ -1025,7 +1113,7 @@ impl App {
                 // Dropping the fetch future on cancel aborts its JoinSet.
                 tokio::select! {
                     _ = cancel.cancelled() => {}
-                    _ = fetch_chapter_images(&source, &url, session_path, tx, err_tx) => {}
+                    _ = fetch_chapter_images(&registry, &source, &url, session_path, tx, err_tx) => {}
                 }
             });
         }
@@ -1504,41 +1592,42 @@ impl App {
     /// Fetch the selected discovery's full series data and insert into the
     /// library. Removes the entry from discovered_manhwa on success and spawns
     /// a cover preload for the library copy.
-    pub async fn do_add_discovery(&mut self) -> Result<()> {
-        use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
-        use crate::db;
-
+    pub fn do_add_discovery(&mut self) {
         let discovery = match self.discoveries.get(self.discover_sel) {
             Some(d) => d.clone(),
-            None    => return Ok(()),
+            None    => return,
         };
+        if !self.registry.contains_key(discovery.source.as_str()) {
+            self.discover_error = Some(source_unavailable(&discovery.source));
+            return;
+        }
 
         self.discover_adding = true;
         self.discover_error  = None;
+        let (discovery_id, source) = (discovery.id, discovery.source.clone());
+        self.spawn_series_fetch(discovery.source, discovery.source_url, move |result| {
+            AppEvent::DiscoveryAddDone { discovery_id, source, result }
+        });
+    }
 
-        let scraper: Box<dyn Scraper> = match discovery.source.as_str() {
-            "mangadex" => Box::new(MangaDexScraper::new()),
-            "mangack"  => Box::new(MangackScraper::new()),
-            "asura"    => Box::new(AsuraScraper::new()),
-            other => {
-                self.discover_error = Some(format!("Unknown source: {other}"));
-                self.discover_adding = false;
-                return Ok(());
-            }
-        };
-
-        let series = match scraper.get_series(&discovery.source_url).await {
+    async fn on_discovery_add_done(
+        &mut self,
+        discovery_id: i64,
+        source: String,
+        result: std::result::Result<SeriesData, String>,
+    ) -> Result<()> {
+        self.discover_adding = false;
+        let series = match result {
             Ok(s)  => s,
             Err(e) => {
                 self.discover_error = Some(format!("Fetch failed: {e}"));
-                self.discover_adding = false;
                 return Ok(());
             }
         };
 
-        match db::insert_manhwa_with_chapters(&self.pool, &series, &discovery.source).await {
+        match db::insert_manhwa_with_chapters(&self.pool, &series, &source).await {
             Ok(new_id) => {
-                let _ = db::delete_discovery(&self.pool, discovery.id).await;
+                let _ = db::delete_discovery(&self.pool, discovery_id).await;
                 self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
                 tokio::spawn(crate::cover_cache::preload_covers(
                     self.cover_cache.cache_dir().clone(),
@@ -1546,11 +1635,9 @@ impl App {
                 ));
                 self.refresh_discoveries().await?;
                 self.set_msg(format!("Added: {}", series.title));
-                self.discover_adding = false;
             }
             Err(e) => {
-                self.discover_error   = Some(e.to_string());
-                self.discover_adding  = false;
+                self.discover_error = Some(e.to_string());
             }
         }
         Ok(())
@@ -1572,28 +1659,92 @@ impl App {
 }
 
 // ---------------------------------------------------------------------------
+// Spawned-task helpers
+// ---------------------------------------------------------------------------
+
+/// Status text for a source that is not in the registry.
+fn source_unavailable(source: &str) -> String {
+    format!("Source '{source}' is disabled or unknown (see [sources] in config.toml)")
+}
+
+/// Tracks the one in-flight search: `start` hands out a sequence number,
+/// `finish` accepts only the current one, so a cancelled or superseded
+/// search's late result is dropped.
+#[derive(Debug, Default)]
+pub struct SearchJob {
+    last_seq: u64,
+    current:  Option<u64>,
+}
+
+impl SearchJob {
+    pub fn start(&mut self) -> u64 {
+        self.last_seq += 1;
+        self.current = Some(self.last_seq);
+        self.last_seq
+    }
+
+    /// Returns whether a search was running.
+    pub fn cancel(&mut self) -> bool {
+        self.current.take().is_some()
+    }
+
+    /// Returns whether `seq` is the running search (and marks it finished).
+    pub fn finish(&mut self, seq: u64) -> bool {
+        if self.current == Some(seq) {
+            self.current = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        self.current.is_some()
+    }
+}
+
+/// Search every source in the registry concurrently. Results are merged in a
+/// fixed source order; failures become "Source: error" strings.
+async fn search_registry(registry: &Registry, query: &str) -> (Vec<SearchResult>, Vec<String>) {
+    let mut names: Vec<&'static str> = registry.keys().copied().collect();
+    if names.is_empty() {
+        return (Vec::new(), vec!["No sources enabled in config.toml".into()]);
+    }
+    names.sort_by_key(|n| (crate::scraper::source_rank(n), *n));
+    let outcomes = futures::future::join_all(
+        names.iter().map(|n| registry[*n].search(query)),
+    ).await;
+
+    let mut merged = Vec::new();
+    let mut errors = Vec::new();
+    for (name, outcome) in names.iter().zip(outcomes) {
+        match outcome {
+            Ok(r)  => merged.extend(r),
+            Err(e) => errors.push(format!("{}: {e}", crate::scraper::source_label(name))),
+        }
+    }
+    (merged, errors)
+}
+
+// ---------------------------------------------------------------------------
 // Image fetching
 // ---------------------------------------------------------------------------
 
 async fn fetch_chapter_images(
+    registry: &Registry,
     source: &str,
     chapter_url: &str,
     session_dir: std::path::PathBuf,
     tx: mpsc::Sender<Option<(usize, Option<std::path::PathBuf>)>>,
     err_tx: mpsc::Sender<String>,
 ) {
-    use crate::scraper::{AsuraScraper, MangaDexScraper, MangackScraper, Scraper};
-    use std::sync::Arc;
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
 
-    // Build a Box<dyn Scraper> from source name
-    let scraper: Box<dyn Scraper> = match source {
-        "mangadex" => Box::new(MangaDexScraper::new()),
-        "mangack"  => Box::new(MangackScraper::new()),
-        "asura"    => Box::new(AsuraScraper::new()),
-        other => {
-            let _ = err_tx.send(format!("Unknown source: {other}")).await;
+    let scraper = match registry.get(source) {
+        Some(s) => s,
+        None => {
+            let _ = err_tx.send(source_unavailable(source)).await;
             let _ = tx.send(None).await;
             return;
         }
@@ -1901,5 +2052,189 @@ mod page_ext_tests {
     #[test]
     fn log_dir_none_without_any_base() {
         assert_eq!(viewer_log_dir(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+    use crate::db::tests::{series, test_pool};
+    use crate::scraper::{Scraper, SearchResult, SeriesData};
+    use async_trait::async_trait;
+
+    // --- SearchJob: start / done / cancel transitions -----------------------
+
+    #[test]
+    fn finished_search_is_accepted_once() {
+        let mut j = SearchJob::default();
+        let s = j.start();
+        assert!(j.running());
+        assert!(j.finish(s));
+        assert!(!j.running());
+        assert!(!j.finish(s), "a result must not be applied twice");
+    }
+
+    #[test]
+    fn cancelled_search_result_is_dropped() {
+        let mut j = SearchJob::default();
+        let s = j.start();
+        assert!(j.cancel());
+        assert!(!j.running());
+        assert!(!j.finish(s));
+        assert!(!j.cancel(), "nothing left to cancel");
+    }
+
+    #[test]
+    fn superseded_search_result_is_dropped() {
+        let mut j = SearchJob::default();
+        let old = j.start();
+        let new = j.start();
+        assert!(!j.finish(old));
+        assert!(j.running());
+        assert!(j.finish(new));
+    }
+
+    // --- search_registry ----------------------------------------------------
+
+    /// Answers search with one result titled after itself, or fails.
+    struct Fake { name: &'static str, fail: bool }
+
+    #[async_trait]
+    impl Scraper for Fake {
+        fn source_name(&self) -> &'static str { self.name }
+        async fn search(&self, q: &str) -> Result<Vec<SearchResult>> {
+            if self.fail { anyhow::bail!("down"); }
+            Ok(vec![SearchResult {
+                title: format!("{} {q}", self.name),
+                cover_url: None,
+                source_url: format!("https://{}/{q}", self.name),
+                pub_status: "ongoing".into(),
+                source: self.name.into(),
+            }])
+        }
+        async fn get_series(&self, url: &str) -> Result<SeriesData> {
+            if self.fail { anyhow::bail!("down"); }
+            Ok(series(3, url))
+        }
+        async fn get_chapter_image_urls(&self, _: &str) -> Result<Vec<String>> { Ok(vec![]) }
+    }
+
+    fn registry(entries: &[(&'static str, bool)]) -> Registry {
+        let mut r = Registry::new();
+        for &(name, fail) in entries {
+            r.insert(name, Box::new(Fake { name, fail }));
+        }
+        r
+    }
+
+    #[tokio::test]
+    async fn search_merges_in_source_order_and_labels_errors() {
+        let reg = registry(&[("asura", false), ("mangack", true), ("mangadex", false)]);
+        let (results, errors) = search_registry(&reg, "q").await;
+        let titles: Vec<_> = results.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["mangadex q", "asura q"]);
+        assert_eq!(errors, vec!["MangaCK: down".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn search_with_no_sources_says_so() {
+        let (results, errors) = search_registry(&Registry::new(), "q").await;
+        assert!(results.is_empty());
+        assert_eq!(errors.len(), 1);
+    }
+
+    // --- App event flow (needs the test database) ---------------------------
+
+    async fn test_app(reg: Registry) -> Option<(App, mpsc::UnboundedReceiver<AppEvent>)> {
+        let pool = test_pool().await?;
+        let config = crate::config::parse_config(
+            "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n",
+        ).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut app = App::new(pool, None, config, tx).await.unwrap();
+        app.registry = Arc::new(reg);
+        Some((app, rx))
+    }
+
+    fn key(code: KeyCode) -> AppEvent {
+        AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[tokio::test]
+    async fn esc_cancels_a_running_search_and_its_late_result_is_ignored() {
+        let Some((mut app, _rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        app.screen = Screen::Search;
+        app.add_search_query = "solo".into();
+        app.start_search();
+        assert!(app.add_search_loading, "loading flag must be set before the result arrives");
+        let seq = app.search_job.last_seq;
+
+        app.handle_event(key(KeyCode::Esc)).await.unwrap();
+        assert!(!app.add_search_loading);
+        assert!(!app.search_job.running());
+        assert_eq!(app.screen, Screen::Search);
+
+        app.handle_event(AppEvent::SearchDone {
+            seq, results: vec![], errors: vec!["late".into()],
+        }).await.unwrap();
+        assert!(app.add_search_error.is_none(), "cancelled search result was applied");
+        assert!(app.add_search_input_active);
+    }
+
+    #[tokio::test]
+    async fn search_result_arrives_as_an_event() {
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        app.screen = Screen::Search;
+        app.add_search_query = "solo".into();
+        app.start_search();
+        let ev = rx.recv().await.unwrap();
+        app.handle_event(ev).await.unwrap();
+        assert!(!app.add_search_loading);
+        assert_eq!(app.add_search_results.len(), 1);
+        assert!(!app.add_search_input_active);
+    }
+
+    #[tokio::test]
+    async fn disabled_source_is_never_fetched_for_add() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        app.screen = Screen::Search;
+        app.add_search_results = vec![SearchResult {
+            title: "t".into(), cover_url: None, source_url: "https://x/t".into(),
+            pub_status: "ongoing".into(), source: "asura".into(),
+        }];
+        app.do_add_manhwa();
+        assert!(!app.add_search_loading);
+        assert!(app.add_search_error.as_deref().unwrap_or("").contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn refresh_applies_new_chapters_without_claiming() {
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        let url = "https://x/refresh";
+        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, url), "mangadex").await.unwrap();
+        app.open_detail(id).await.unwrap();
+        assert_eq!(app.chapter_list.len(), 1);
+
+        app.handle_event(key(KeyCode::Char('R'))).await.unwrap();
+        assert_eq!(app.refreshing, Some(id), "refresh flag must be set before the result arrives");
+        let ev = rx.recv().await.unwrap();
+        app.handle_event(ev).await.unwrap();
+
+        assert_eq!(app.refreshing, None);
+        assert_eq!(app.chapter_list.len(), 3, "fetched chapters were not applied");
+        let unclaimed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chapter WHERE manhwa_id = $1 AND notified_at IS NULL",
+        ).bind(id).fetch_one(&app.pool).await.unwrap();
+        assert_eq!(unclaimed, 2, "refresh must leave new chapters for the notifying poller");
+    }
+
+    #[tokio::test]
+    async fn poll_now_key_wakes_the_coordinator() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let poll_now = app.poll_now.clone();
+        app.handle_event(key(KeyCode::Char('p'))).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), poll_now.notified())
+            .await
+            .expect("poll_now key did not notify");
     }
 }

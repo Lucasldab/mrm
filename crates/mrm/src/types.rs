@@ -227,4 +227,27 @@ pub enum AppEvent {
     #[allow(dead_code)]
     DataRefreshed,
     ScraperMsg(crate::scraper::ScraperEvent),
+    /// A spawned cross-source search finished. `seq` identifies the search so
+    /// a cancelled or superseded one is ignored.
+    SearchDone {
+        seq:     u64,
+        results: Vec<crate::scraper::SearchResult>,
+        errors:  Vec<String>,
+    },
+    /// The series fetch for "add from search" finished.
+    AddDone {
+        source: String,
+        result: Result<crate::scraper::SeriesData, String>,
+    },
+    /// The series fetch for a Detail-screen refresh (`R`) finished.
+    RefreshDone {
+        manhwa_id: i64,
+        result:    Result<crate::scraper::SeriesData, String>,
+    },
+    /// The series fetch for "add from Discover" finished.
+    DiscoveryAddDone {
+        discovery_id: i64,
+        source:       String,
+        result:       Result<crate::scraper::SeriesData, String>,
+    },
 }

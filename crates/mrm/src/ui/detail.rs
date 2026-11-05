@@ -192,7 +192,13 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         "{}/{} move  {} read  {} status  {} unread  {} mark read  R refresh{}  Esc back",
         keys.down, keys.up, keys.open, keys.set_status, keys.mark_unread, keys.mark_read, override_hint
     );
-    let msg = app.status_msg.as_deref().unwrap_or(default_hint.as_str());
+    let refreshing = app.refreshing.is_some()
+        && app.refreshing == app.current_manhwa.as_ref().map(|m| m.id);
+    let msg = match app.status_msg.as_deref() {
+        Some(m) => m,
+        None if refreshing => "Refreshing from source...",
+        None => default_hint.as_str(),
+    };
 
     let bar = Paragraph::new(msg.to_owned()).style(
         Style::default().fg(app.theme.bar_fg()).bg(app.theme.bar_bg()),

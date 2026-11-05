@@ -180,6 +180,9 @@ pub struct KeysConfig {
 
     // Library sort
     pub sort:         String,
+
+    // Library: wake the background poller now
+    pub poll_now:     String,
 }
 
 impl Default for KeysConfig {
@@ -204,6 +207,7 @@ impl Default for KeysConfig {
             prev_chapter:   "[".into(),
             input_mode:     "i".into(),
             sort:           "o".into(),
+            poll_now:       "p".into(),
         }
     }
 }
@@ -244,6 +248,7 @@ impl KeysConfig {
     pub fn prev_chapter(&self)   -> KeyCode { Self::parse_key(&self.prev_chapter) }
     pub fn input_mode(&self)     -> KeyCode { Self::parse_key(&self.input_mode) }
     pub fn sort(&self)           -> KeyCode { Self::parse_key(&self.sort) }
+    pub fn poll_now(&self)       -> KeyCode { Self::parse_key(&self.poll_now) }
 }
 
 // ---------------------------------------------------------------------------

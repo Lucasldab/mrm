@@ -7,7 +7,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::time::Duration;
+
+use crate::config::Config;
 
 // ---------------------------------------------------------------------------
 // Shared data types
@@ -83,6 +86,64 @@ pub trait Scraper: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Enabled scrapers keyed by source name. Built once per process by
+/// [`build_registry`] and shared (behind an `Arc`) by the coordinator, the
+/// TUI's search/add/refresh tasks and the image fetcher.
+pub type Registry = HashMap<&'static str, Box<dyn Scraper>>;
+
+/// The one place scrapers are constructed. Sources with `enabled = false` and
+/// unknown names are left out, so they are never contacted.
+pub fn build_registry(config: &Config) -> Registry {
+    let mut registry: Registry = HashMap::new();
+    for (name, source_cfg) in &config.sources {
+        if !source_cfg.enabled {
+            continue;
+        }
+        match name.as_str() {
+            "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
+            "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
+            "asura"    => { registry.insert("asura",    Box::new(AsuraScraper::new())); }
+            _ => {}
+        }
+    }
+    registry
+}
+
+/// Enabled source names in the config that no scraper implements (for a
+/// startup warning in the non-TUI modes).
+pub fn unknown_sources(config: &Config) -> Vec<String> {
+    let mut v: Vec<String> = config.sources.iter()
+        .filter(|(n, c)| c.enabled && !matches!(n.as_str(), "mangadex" | "mangack" | "asura"))
+        .map(|(n, _)| n.clone())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Fixed display order for merged search results (HashMap order is random).
+pub fn source_rank(name: &str) -> u8 {
+    match name {
+        "mangadex" => 0,
+        "mangack"  => 1,
+        "asura"    => 2,
+        _          => 3,
+    }
+}
+
+/// Human-readable source name for error messages.
+pub fn source_label(name: &str) -> &str {
+    match name {
+        "mangadex" => "MangaDex",
+        "mangack"  => "MangaCK",
+        "asura"    => "Asura",
+        other      => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Retry helper
 // ---------------------------------------------------------------------------
 
@@ -131,7 +192,7 @@ pub mod asura;
 pub use asura::AsuraScraper;
 
 pub mod coordinator;  // Phase 5 Plan 02
-pub use coordinator::{coordinator_task, ScraperEvent};
+pub use coordinator::{coordinator_task, stop_coordinator, ScraperEvent};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -145,6 +206,39 @@ mod tests {
     fn mangadex_scraper_instantiates() {
         let scraper = MangaDexScraper::new();
         assert_eq!(scraper.source_name(), "mangadex");
+    }
+
+    fn config_with(sources: &str) -> crate::config::Config {
+        crate::config::parse_config(&format!(
+            "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n{sources}"
+        )).unwrap()
+    }
+
+    #[test]
+    fn registry_excludes_a_disabled_source() {
+        let cfg = config_with(
+            "[sources.mangadex]\nbase_url = \"x\"\nenabled = true\n\
+             [sources.mangack]\nbase_url = \"x\"\nenabled = false\n",
+        );
+        let reg = build_registry(&cfg);
+        assert!(reg.contains_key("mangadex"));
+        assert!(!reg.contains_key("mangack"), "disabled source must not be in the registry");
+        assert!(!reg.contains_key("asura"), "unconfigured source must not be in the registry");
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn registry_skips_unknown_sources() {
+        let cfg = config_with("[sources.nope]\nbase_url = \"x\"\nenabled = true\n");
+        assert!(build_registry(&cfg).is_empty());
+        assert_eq!(unknown_sources(&cfg), vec!["nope".to_string()]);
+    }
+
+    #[test]
+    fn search_order_is_stable() {
+        let mut names = vec!["asura", "zzz", "mangack", "mangadex"];
+        names.sort_by_key(|n| source_rank(n));
+        assert_eq!(names, vec!["mangadex", "mangack", "asura", "zzz"]);
     }
 
     #[test]

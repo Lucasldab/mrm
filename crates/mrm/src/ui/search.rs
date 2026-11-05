@@ -82,7 +82,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // --- Status bar ---
     let keys = &app.keys;
-    let hint = if app.add_search_loading {
+    let hint = if app.search_job.running() {
+        " Searching...  Esc cancel".to_string()
+    } else if app.add_search_loading {
         " Fetching... please wait".to_string()
     } else if app.add_search_input_active {
         " Enter search  Esc back".to_string()
