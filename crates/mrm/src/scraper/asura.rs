@@ -60,7 +60,6 @@ fn is_nav_label(label: &str) -> bool {
 
 static SEL_COMICS_LINK:   LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href*='/comics/']").unwrap());
 static SEL_H3:            LazyLock<Selector> = LazyLock::new(|| Selector::parse("h3").unwrap());
-static SEL_IMG_COVERS:    LazyLock<Selector> = LazyLock::new(|| Selector::parse("img[src*='covers']").unwrap());
 static SEL_H1:            LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
 static SEL_IMG:           LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
 static SEL_SPAN:          LazyLock<Selector> = LazyLock::new(|| Selector::parse("span").unwrap());
@@ -326,10 +325,7 @@ fn parse_series(source_url: &str, final_url: &str, body: &str) -> SeriesData {
         .map(|h1| h1.text().collect::<String>().trim().to_string())
         .unwrap_or_default();
 
-    let cover_url = tree.select(&SEL_IMG)
-        .filter_map(|img| img.value().attr("src"))
-        .find(|src| src.contains("covers"))
-        .map(|s| s.to_string());
+    let cover_url = cover_img(&tree.root_element()).map(|(_, url)| url);
 
     let status = tree.select(&SEL_SPAN)
         .filter_map(|span| {
@@ -368,16 +364,13 @@ fn parse_latest_chapters(body: &str) -> Vec<DiscoveryEntry> {
         let path = href.split('?').next().unwrap_or("").trim_end_matches('/').to_string();
         if !path.starts_with("/comics/") || cards.contains_key(&path) { continue; }
 
-        let img = match a.select(&SEL_IMG_COVERS).next() {
-            Some(i) => i,
+        let (img, cover_url) = match cover_img(&a) {
+            Some(c) => c,
             None    => continue,
         };
         let title = img.value().attr("alt").unwrap_or("").trim().to_string();
         if title.is_empty() || title.len() < 2 { continue; }
-        let cover_url = img.value().attr("src")
-            .or_else(|| img.value().attr("data-src"))
-            .map(|s| s.to_string());
-        cards.insert(path, (title, cover_url));
+        cards.insert(path, (title, Some(cover_url)));
     }
 
     let mut latest: HashMap<String, f64> = HashMap::new();
@@ -422,12 +415,17 @@ fn parse_latest_chapters(body: &str) -> Vec<DiscoveryEntry> {
 
 /// Walk an anchor and up to two of its ancestors looking for an `img` tagged
 /// as a cover. Mirrors asura.py's two-step ancestor walk.
+/// The first `img` under `el` whose real (lazy-aware) URL is a cover.
+fn cover_img<'a>(el: &scraper::ElementRef<'a>) -> Option<(scraper::ElementRef<'a>, String)> {
+    el.select(&SEL_IMG)
+        .filter_map(|img| super::img_url(&img).map(|u| (img, u)))
+        .find(|(_, u)| u.contains("covers"))
+}
+
 fn find_cover_near(a: &scraper::ElementRef<'_>) -> Option<String> {
     // The anchor itself
-    if let Some(img) = a.select(&SEL_IMG_COVERS).next() {
-        if let Some(src) = img.value().attr("src").or_else(|| img.value().attr("data-src")) {
-            return Some(src.to_string());
-        }
+    if let Some((_, src)) = cover_img(a) {
+        return Some(src);
     }
     // Walk up two levels via NodeRef::parent() + ElementRef::wrap (same
     // pattern as mangack::find_cover_in_ancestors).
@@ -436,10 +434,8 @@ fn find_cover_near(a: &scraper::ElementRef<'_>) -> Option<String> {
         .and_then(|p| p.parent())
         .and_then(scraper::ElementRef::wrap);
     for ancestor in [parent, grandparent].into_iter().flatten() {
-        if let Some(img) = ancestor.select(&SEL_IMG_COVERS).next() {
-            if let Some(src) = img.value().attr("src").or_else(|| img.value().attr("data-src")) {
-                return Some(src.to_string());
-            }
+        if let Some((_, src)) = cover_img(&ancestor) {
+            return Some(src);
         }
     }
     None
@@ -518,4 +514,34 @@ fn urlencoding_minimal(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- M8: lazy-loaded covers ---
+
+    #[test]
+    fn search_cover_uses_lazy_src() {
+        let html = r#"<html><body><div class="card">
+            <a href="/comics/solo-leveling-1a2b3c4d">
+              <img src="data:image/svg+xml;base64,AAA" data-src="https://cdn.x/covers/solo.webp">
+              <h3>Solo Leveling</h3>
+            </a>
+        </div></body></html>"#;
+        let r = parse_search(html);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].cover_url.as_deref(), Some("https://cdn.x/covers/solo.webp"));
+    }
+
+    #[test]
+    fn search_cover_found_in_ancestor_with_lazy_src() {
+        let html = r#"<html><body><div class="card">
+            <img src="data:," data-lazy-src="https://cdn.x/covers/tog.webp">
+            <a href="/comics/tower-of-god-1a2b3c4d"><h3>Tower of God</h3></a>
+        </div></body></html>"#;
+        let r = parse_search(html);
+        assert_eq!(r[0].cover_url.as_deref(), Some("https://cdn.x/covers/tog.webp"));
+    }
 }

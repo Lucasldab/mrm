@@ -44,8 +44,8 @@ static SEL_IMG: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("img").unwrap());
 static SEL_H1: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("h1").unwrap());
-static SEL_IMG_COVER: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(r#"img[src*="wp-content/uploads"]"#).unwrap());
+static SEL_READER_IMG: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".reading-content img").unwrap());
 static SEL_TD_TH: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("td, th").unwrap());
 static SEL_A_CHAPTER: LazyLock<Selector> =
@@ -290,13 +290,9 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
         .ok_or_else(|| anyhow!("MangaCK: no h1 title found at {source_url}"))?;
 
     let cover_url = document
-        .select(&SEL_IMG_COVER)
-        .find_map(|el| {
-            el.value()
-                .attr("src")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        });
+        .select(&SEL_IMG)
+        .filter_map(|el| super::img_url(&el))
+        .find(|u| u.contains("wp-content/uploads"));
 
     let pub_status = find_status(&document);
     let description = find_description(&document);
@@ -375,17 +371,16 @@ fn parse_chapter_images(html: &str) -> Vec<String> {
     let document = Html::parse_document(html);
     let mut urls = Vec::new();
 
-    for img in document.select(&SEL_IMG) {
-        let src = img
-            .value()
-            .attr("src")
-            .or_else(|| img.value().attr("data-src"))
-            .unwrap_or("")
-            .to_string();
+    // Scope to the reader container so related-series covers and widgets
+    // can't become "pages"; fall back to the whole page only without one.
+    let selector: &Selector = if document.select(&SEL_READER_IMG).next().is_some() {
+        &SEL_READER_IMG
+    } else {
+        &SEL_IMG
+    };
 
-        if src.is_empty() || src.starts_with("data:") {
-            continue;
-        }
+    for img in document.select(selector) {
+        let Some(src) = super::img_url(&img) else { continue };
 
         let low = src.to_lowercase();
 
@@ -458,14 +453,8 @@ fn find_cover_in_ancestors(element: &scraper::ElementRef<'_>) -> Option<String> 
 
     for ancestor in [parent_ref, grandparent_ref].into_iter().flatten() {
         if let Some(img) = ancestor.select(&SEL_IMG).next() {
-            let src = img
-                .value()
-                .attr("src")
-                .or_else(|| img.value().attr("data-src"));
-            if let Some(s) = src {
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
+            if let Some(src) = super::img_url(&img) {
+                return Some(src);
             }
         }
     }
@@ -631,8 +620,9 @@ pub(crate) fn chapter_href_matches_slug(href: &str, slug: &str) -> bool {
     // but require the slug to be followed by `-chapter-` (the canonical
     // separator) — `solo-leveling-2` must not match `solo-leveling`.
     let needle = format!("{slug}-chapter-");
-    after.len() >= needle.len()
-        && after[..needle.len()].eq_ignore_ascii_case(&needle)
+    // `get` instead of indexing: hrefs from other widgets may hold unencoded
+    // non-ASCII, and a byte offset inside a character must not panic.
+    after.get(..needle.len()).is_some_and(|p| p.eq_ignore_ascii_case(&needle))
 }
 
 /// Return the portion of a chapter href after `{slug}-`, so chapter-number
@@ -645,12 +635,10 @@ pub(crate) fn chapter_url_after_slug(href: &str, slug: &str) -> Option<String> {
 
     let after = path.split("/chapter/").nth(1)?;
     let prefix = format!("{slug}-");
-    if after.len() < prefix.len()
-        || !after[..prefix.len()].eq_ignore_ascii_case(&prefix)
-    {
+    if !after.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(&prefix)) {
         return None;
     }
-    Some(after[prefix.len()..].to_string())
+    after.get(prefix.len()..).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -947,5 +935,70 @@ mod tests {
             "the-100",
         )
         .is_none());
+    }
+
+    // --- H5: non-ASCII hrefs must not panic on byte slicing ---
+
+    #[test]
+    fn non_ascii_chapter_href_does_not_panic_or_match() {
+        // Prefix "x-" is 2 bytes, inside the 3-byte '한'.
+        assert!(!chapter_href_matches_slug("/chapter/한국-chapter-1", "x"));
+        assert_eq!(chapter_url_after_slug("/chapter/한국-chapter-1", "x"), None);
+        // Needle "solo-chapter-" is 13 bytes, inside the fifth Korean char.
+        assert!(!chapter_href_matches_slug("/chapter/한국어한국어-chapter-1", "solo"));
+        assert_eq!(chapter_url_after_slug("/chapter/한국어한국어-chapter-1", "solo"), None);
+    }
+
+    // --- M8: lazy-loaded images, reader container scoping ---
+
+    #[test]
+    fn reader_images_use_lazy_attrs_and_stay_in_the_reading_container() {
+        let html = r#"<html><body>
+            <div class="reading-content">
+              <img src="data:image/svg+xml;base64,AAA" data-src="https://cdn.x/ch/001.jpg">
+              <img src="data:image/svg+xml;base64,AAA" data-lazy-src="https://cdn.x/ch/002.webp">
+              <img srcset="https://cdn.x/ch/003.png 800w, https://cdn.x/ch/003-big.png 1600w">
+            </div>
+            <div class="related">
+              <img src="https://mangack.com/wp-content/uploads/other-series-cover.jpg">
+            </div>
+        </body></html>"#;
+        assert_eq!(
+            parse_chapter_images(html),
+            vec![
+                "https://cdn.x/ch/001.jpg".to_string(),
+                "https://cdn.x/ch/002.webp".to_string(),
+                "https://cdn.x/ch/003.png".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn reader_images_fall_back_to_whole_page_without_container() {
+        let html = r#"<html><body>
+            <img src="https://mangack.com/logo.png">
+            <img src="data:image/svg+xml;base64,AAA" data-src="https://cdn.x/ch/001.jpg">
+        </body></html>"#;
+        assert_eq!(parse_chapter_images(html), vec!["https://cdn.x/ch/001.jpg".to_string()]);
+    }
+
+    #[test]
+    fn search_cover_uses_lazy_src() {
+        let html = r#"<html><body><div class="item"><div class="thumb">
+            <img src="data:image/svg+xml;base64,AAA" data-src="https://mangack.com/wp-content/uploads/cover.jpg">
+            <a href="https://mangack.com/manga/solo-leveling/">Solo Leveling</a>
+        </div></div></body></html>"#;
+        let r = parse_search_results(html);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].cover_url.as_deref(), Some("https://mangack.com/wp-content/uploads/cover.jpg"));
+    }
+
+    #[test]
+    fn series_cover_uses_lazy_src() {
+        let html = r#"<html><body><h1>Solo Leveling</h1>
+            <img src="data:image/svg+xml;base64,AAA" data-src="https://mangack.com/wp-content/uploads/cover.jpg">
+        </body></html>"#;
+        let s = parse_series_page(html, "https://mangack.com/manga/solo-leveling/").unwrap();
+        assert_eq!(s.cover_url.as_deref(), Some("https://mangack.com/wp-content/uploads/cover.jpg"));
     }
 }

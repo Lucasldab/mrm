@@ -144,6 +144,26 @@ pub fn source_label(name: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// HTML image helper
+// ---------------------------------------------------------------------------
+
+/// The real URL of an `<img>`: lazy-load attributes (`data-src`,
+/// `data-lazy-src`, first `srcset` candidate) win over `src`, which lazy-load
+/// themes fill with a `data:` placeholder. `data:` URIs and blanks are skipped.
+pub(crate) fn img_url(img: &scraper::ElementRef<'_>) -> Option<String> {
+    let el = img.value();
+    let srcset_first = el.attr("srcset")
+        .and_then(|s| s.split(',').next())
+        .and_then(|c| c.split_whitespace().next());
+    [el.attr("data-src"), el.attr("data-lazy-src"), srcset_first, el.attr("src")]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|u| !u.is_empty() && !u.starts_with("data:"))
+        .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
 // Retry helper
 // ---------------------------------------------------------------------------
 
@@ -239,6 +259,31 @@ mod tests {
         let mut names = vec!["asura", "zzz", "mangack", "mangadex"];
         names.sort_by_key(|n| source_rank(n));
         assert_eq!(names, vec!["mangadex", "mangack", "asura", "zzz"]);
+    }
+
+    fn first_img(html: &str) -> Option<String> {
+        let doc = scraper::Html::parse_fragment(html);
+        let sel = scraper::Selector::parse("img").unwrap();
+        let el = doc.select(&sel).next().unwrap();
+        img_url(&el)
+    }
+
+    #[test]
+    fn img_url_prefers_lazy_attributes_over_placeholder_src() {
+        assert_eq!(
+            first_img(r#"<img src="data:image/svg+xml;base64,AAA" data-src="https://c/1.jpg">"#),
+            Some("https://c/1.jpg".into()),
+        );
+        assert_eq!(
+            first_img(r#"<img src="https://c/placeholder.gif" data-lazy-src="https://c/2.jpg">"#),
+            Some("https://c/2.jpg".into()),
+        );
+        assert_eq!(
+            first_img(r#"<img src="data:," srcset="https://c/3.webp 1x, https://c/3@2x.webp 2x">"#),
+            Some("https://c/3.webp".into()),
+        );
+        assert_eq!(first_img(r#"<img src="https://c/4.png">"#), Some("https://c/4.png".into()));
+        assert_eq!(first_img(r#"<img src="data:image/gif;base64,R0" data-src=" ">"#), None);
     }
 
     #[test]
