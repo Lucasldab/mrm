@@ -145,47 +145,36 @@ async fn poll_all(
             }
         };
 
-        // Upsert chapters; returns count of chapters new to the user
-        let new_count = match db::upsert_chapters(pool, manhwa.id, &series.chapters).await {
+        let new_count = match db::apply_poll_result(pool, manhwa.id, &series, &manhwa.pub_status).await {
             Ok(n) => n,
             Err(e) => {
-                log!("mrm: upsert error for '{}': {e}", manhwa.title);
+                log!("mrm: poll write error for '{}': {e}", manhwa.title);
                 continue;
             }
         };
-
-        // Only recompute status when something the formula depends on actually
-        // changed: new chapters arrived or the publication status shifted.
-        // Polling-driven recomputes on unchanged inputs caused status flips
-        // that looked random to the user.
-        let pub_changed = series.pub_status != manhwa.pub_status;
-        if pub_changed {
-            if let Err(e) = db::update_pub_status(pool, manhwa.id, &series.pub_status).await {
-                log!("mrm: update_pub_status error for '{}': {e}", manhwa.title);
-            }
-        }
-        if new_count > 0 || pub_changed {
-            if let Err(e) = db::recompute_status(pool, manhwa.id).await {
-                log!("mrm: recompute_status error for '{}': {e}", manhwa.title);
-            }
-        }
-
         if new_count > 0 {
             log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
             updated_titles.push(manhwa.title.clone());
         }
     }
 
-    // Notify and signal TUI only if there were updates
-    if !updated_titles.is_empty() {
-        if config.notifications.enabled {
-            notifier::send_grouped(&updated_titles);
-            notifier::send_grouped_remote(&config.notifications, &updated_titles).await;
+    // Notifying pollers (daemon) announce whatever no poller has announced yet,
+    // including chapters a laptop's quiet poller inserted first. The quiet TUI
+    // poller never claims, so it cannot swallow the phone push.
+    if !quiet {
+        match db::claim_unnotified(pool).await {
+            Ok(claimed) if !claimed.is_empty() && config.notifications.enabled => {
+                let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();
+                notifier::send_grouped(&titles);
+                notifier::send_grouped_remote(&config.notifications, &titles).await;
+            }
+            Ok(_) => {}
+            Err(e) => log!("mrm: claim error: {e}"),
         }
+    }
+    if !updated_titles.is_empty() {
         // Signal TUI to refresh library list; ignore send error (TUI may be exiting)
-        let _ = scraper_tx.send(ScraperEvent::NewChapters {
-            titles: updated_titles,
-        }).await;
+        let _ = scraper_tx.send(ScraperEvent::NewChapters { titles: updated_titles }).await;
     }
 
     // Piggyback the discovery pass on the same tick, but gated so it runs at

@@ -327,47 +327,25 @@ pub async fn fetch_chapters(pool: &PgPool, manhwa_id: i64) -> Result<Vec<Chapter
 // Chapter upsert (coordinator writes)
 // ---------------------------------------------------------------------------
 
-/// Upsert a batch of chapters for a manhwa.
-///
-/// Each chapter is inserted with ON CONFLICT(manhwa_id, number) DO UPDATE
-/// so title/url/released_at are refreshed even for known chapters.
-///
-/// Returns the count of chapters that are genuinely new — defined as having
-/// no entry in the progress table (i.e., the user has never started them).
-/// This count is used to decide whether to send a desktop notification.
-pub async fn upsert_chapters(
-    pool: &PgPool,
+/// Upsert a batch inside the caller's transaction. Returns how many rows were
+/// newly inserted (`xmax = 0` is true only for the INSERT path of an upsert).
+/// New rows start with notified_at NULL; updates never touch notified_at.
+async fn upsert_chapters_conn(
+    conn: &mut PgConnection,
     manhwa_id: i64,
     chapters: &[crate::scraper::ChapterData],
 ) -> Result<usize> {
-    if chapters.is_empty() {
-        return Ok(0);
-    }
-
-    let mut tx = pool.begin().await?;
-    let mut new_count = 0usize;
-
+    let mut inserted = 0usize;
     for ch in chapters {
-        // Check if this chapter already exists before upserting.
-        let already_exists: bool = sqlx::query(
-            "SELECT EXISTS(SELECT 1 FROM chapter WHERE manhwa_id = $1 AND number = $2)",
-        )
-        .bind(manhwa_id)
-        .bind(ch.number)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get::<bool, _>(0)
-        .unwrap_or(false);
-
-        // Upsert the chapter row.
-        sqlx::query(
+        let new: bool = sqlx::query_scalar(
             r#"
             INSERT INTO chapter (manhwa_id, number, title, url, released_at)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT(manhwa_id, number) DO UPDATE SET
+            ON CONFLICT (manhwa_id, number) DO UPDATE SET
                 title       = excluded.title,
                 url         = excluded.url,
                 released_at = excluded.released_at
+            RETURNING (xmax = 0)
             "#,
         )
         .bind(manhwa_id)
@@ -375,16 +353,71 @@ pub async fn upsert_chapters(
         .bind(&ch.title)
         .bind(&ch.url)
         .bind(&ch.released_at)
-        .execute(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
-
-        if !already_exists {
-            new_count += 1;
-        }
+        if new { inserted += 1; }
     }
+    Ok(inserted)
+}
 
+pub async fn upsert_chapters(
+    pool: &PgPool,
+    manhwa_id: i64,
+    chapters: &[crate::scraper::ChapterData],
+) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+    let n = upsert_chapters_conn(&mut tx, manhwa_id, chapters).await?;
     tx.commit().await?;
-    Ok(new_count)
+    Ok(n)
+}
+
+/// One poll result for one series, atomically: chapters, pub_status, and the
+/// status recompute (only when something it depends on changed). A crash
+/// mid-way leaves nothing half-written (SCAN.md risks 1 and 3).
+pub async fn apply_poll_result(
+    pool: &PgPool,
+    manhwa_id: i64,
+    series: &crate::scraper::SeriesData,
+    old_pub_status: &str,
+) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+    let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &series.chapters).await?;
+    let pub_changed = series.pub_status != old_pub_status;
+    if pub_changed {
+        update_pub_status_conn(&mut tx, manhwa_id, &series.pub_status).await?;
+    }
+    if inserted > 0 || pub_changed {
+        recompute_status_conn(&mut tx, manhwa_id).await?;
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// Claim every chapter no notifying poller has announced yet, in one statement
+/// (row locks make concurrent claims disjoint). Returns (title, count) for the
+/// claimed chapters the user has not started; started/read ones are claimed
+/// silently. Only notifying pollers call this - never the TUI's quiet poller.
+pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<(String, i64)>> {
+    let rows = sqlx::query(
+        r#"
+        WITH claimed AS (
+            UPDATE chapter SET notified_at = now()
+            WHERE notified_at IS NULL
+            RETURNING id, manhwa_id
+        )
+        SELECT m.title, COUNT(*) AS n
+        FROM claimed c
+        JOIN manhwa m ON m.id = c.manhwa_id
+        WHERE NOT EXISTS (SELECT 1 FROM progress p WHERE p.chapter_id = c.id)
+        GROUP BY m.id, m.title
+        ORDER BY m.title
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| Ok((r.try_get("title")?, r.try_get("n")?)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -820,5 +853,59 @@ pub(crate) mod tests {
         set_discovery_meta(&pool, "k", "v1").await.unwrap();
         set_discovery_meta(&pool, "k", "v2").await.unwrap();
         assert_eq!(get_discovery_meta(&pool, "k").await.unwrap().as_deref(), Some("v2"));
+    }
+
+    #[tokio::test]
+    async fn poll_counts_only_inserts() {
+        let pool = pool_or_skip!();
+        let mut s = series(3, "https://x/p");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        s.chapters.push(ch(4.0, "https://x/p"));
+        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 1);
+        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 0);
+        s.pub_status = "completed".into();
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().pub_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn claim_notifies_new_chapters_once() {
+        let pool = pool_or_skip!();
+        let mut s = series(3, "https://x/q");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        assert!(claim_unnotified(&pool).await.unwrap().is_empty(), "back catalogue is never announced");
+        s.chapters.push(ch(4.0, "https://x/q"));
+        s.chapters.push(ch(4.5, "https://x/q"));
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        assert_eq!(claim_unnotified(&pool).await.unwrap(), vec![(s.title.clone(), 2)]);
+        assert!(claim_unnotified(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_claims_never_double_notify() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, "https://x/r");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        for n in 2..=21 { s.chapters.push(ch(n as f64, "https://x/r")); }
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        let (a, b) = tokio::join!(claim_unnotified(&pool), claim_unnotified(&pool));
+        let total: i64 = a.unwrap().iter().chain(b.unwrap().iter()).map(|(_, n)| n).sum();
+        assert_eq!(total, 20);
+    }
+
+    #[tokio::test]
+    async fn read_chapters_are_claimed_silently() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, "https://x/s");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        s.chapters.push(ch(2.0, "https://x/s"));
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        let c2 = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 2.0).unwrap();
+        start_chapter(&pool, c2.id).await.unwrap();
+        update_scroll(&pool, c2.id, 1.0).await.unwrap();
+        assert!(claim_unnotified(&pool).await.unwrap().is_empty());
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapter WHERE notified_at IS NULL")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(pending, 0);
     }
 }

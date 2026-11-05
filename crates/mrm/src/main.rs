@@ -171,8 +171,6 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     let manhwa_list = db::fetch_all_manhwa(&pool).await?;
     eprintln!("mrm: checking {} manhwa", manhwa_list.len());
 
-    let mut updated: Vec<String> = Vec::new();
-
     for manhwa in &manhwa_list {
         let scraper = match registry.get(manhwa.source.as_str()) {
             Some(s) => s,
@@ -187,23 +185,23 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
             }
         };
 
-        let new_count = db::upsert_chapters(&pool, manhwa.id, &series.chapters).await?;
-        let _ = db::recompute_status(&pool, manhwa.id).await;
+        let new_count = db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await?;
 
         if new_count > 0 {
             eprintln!("  + {} — {} new chapter(s)", manhwa.title, new_count);
-            updated.push(manhwa.title.clone());
         } else {
             eprintln!("  ✓ {} — up to date", manhwa.title);
         }
     }
 
-    if !updated.is_empty() && config.notifications.enabled {
-        notifier::send_grouped(&updated);
-        notifier::send_grouped_remote(&config.notifications, &updated).await;
-        eprintln!("\nmrm: notified for {} title(s)", updated.len());
+    let claimed = db::claim_unnotified(&pool).await?;
+    if !claimed.is_empty() && config.notifications.enabled {
+        let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();
+        notifier::send_grouped(&titles);
+        notifier::send_grouped_remote(&config.notifications, &titles).await;
+        eprintln!("\nmrm: notified for {} title(s)", titles.len());
     } else {
-        eprintln!("\nmrm: no new chapters");
+        eprintln!("\nmrm: nothing new to notify");
     }
 
     // Discovery pass (once-mode always runs it to make manual triggering easy;
