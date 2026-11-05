@@ -245,14 +245,15 @@ pub(crate) enum RetryDecision {
     Fail,
     /// Transient: wait the usual backoff step.
     Backoff,
-    /// Transient, and the server said how long to wait (capped).
+    /// Transient, and the server said how long to wait (at most `MAX_RETRY_AFTER`).
     After(Duration),
 }
 
 fn classify_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
     if status == 429 || (500..600).contains(&status) {
         match retry_after {
-            Some(d) => RetryDecision::After(d.min(MAX_RETRY_AFTER)),
+            Some(d) if d > MAX_RETRY_AFTER => RetryDecision::Fail,
+            Some(d) => RetryDecision::After(d),
             None    => RetryDecision::Backoff,
         }
     } else {
@@ -293,8 +294,8 @@ pub(crate) fn classify(err: &anyhow::Error) -> RetryDecision {
 
 const BACKOFF: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
 
-/// Up to 3 attempts with 1 s, 2 s backoff (or the server's `Retry-After`,
-/// capped at 60 s), but only for errors [`classify`] calls transient.
+/// Up to 3 attempts with 1 s, 2 s backoff (or the server's `Retry-After`; one
+/// above 60 s fails immediately), but only for errors [`classify`] calls transient.
 ///
 /// Returns the first Ok result, or the error that ended the attempts.
 ///
@@ -443,10 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn too_many_requests_honours_retry_after_capped() {
+    fn too_many_requests_honours_retry_after_and_fails_beyond_the_cap() {
         assert_eq!(classify(&status(429, None)), RetryDecision::Backoff);
         assert_eq!(classify(&status(429, Some("5"))), RetryDecision::After(Duration::from_secs(5)));
-        assert_eq!(classify(&status(429, Some("3600"))), RetryDecision::After(MAX_RETRY_AFTER));
+        assert_eq!(classify(&status(429, Some("60"))), RetryDecision::After(MAX_RETRY_AFTER));
+        assert_eq!(classify(&status(429, Some("61"))), RetryDecision::Fail);
+        assert_eq!(classify(&status(503, Some("3600"))), RetryDecision::Fail);
         assert_eq!(classify(&status(429, Some("garbage"))), RetryDecision::Backoff);
     }
 
