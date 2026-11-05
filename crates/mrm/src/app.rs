@@ -827,13 +827,7 @@ impl App {
             self.status_sel = self.status_sel.saturating_sub(1);
         } else if k == self.keys.open() || k == KeyCode::Enter {
             let chosen = options[self.status_sel].clone();
-            if chosen == Status::UpToDate {
-                db::mark_all_chapters_read(&self.pool, manhwa_id).await?;
-                db::clear_status_override(&self.pool, manhwa_id).await?;
-                db::recompute_status(&self.pool, manhwa_id).await?;
-            } else {
-                db::set_manhwa_status(&self.pool, manhwa_id, &chosen, true).await?;
-            }
+            db::apply_picker_status(&self.pool, manhwa_id, &chosen).await?;
             self.refresh_detail(manhwa_id).await?;
             self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
             self.screen = Screen::Detail { manhwa_id };

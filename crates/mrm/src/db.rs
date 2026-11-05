@@ -534,6 +534,25 @@ pub(crate) async fn update_pub_status_conn(
     Ok(())
 }
 
+/// "Looked into" means the user has not yet read a meaningful sample: fewer
+/// than five chapters read, or fewer than all of them when the series has
+/// fewer than five. An empty series has nothing to be up to date with.
+pub(crate) fn looked_into(read: i64, total: i64) -> bool {
+    total == 0 || read < total.min(5)
+}
+
+/// Apply a status chosen in the picker. Up to date marks every chapter read
+/// and writes that status explicitly (no override: later chapters resume
+/// auto-tracking); any other status is a manual override.
+pub async fn apply_picker_status(pool: &PgPool, manhwa_id: i64, chosen: &Status) -> Result<()> {
+    if *chosen == Status::UpToDate {
+        mark_all_chapters_read(pool, manhwa_id).await?;
+        set_manhwa_status(pool, manhwa_id, chosen, false).await
+    } else {
+        set_manhwa_status(pool, manhwa_id, chosen, true).await
+    }
+}
+
 /// Recompute and persist status for a manhwa (mirrors Python's apply_computed_status).
 pub async fn recompute_status(pool: &PgPool, manhwa_id: i64) -> Result<Status> {
     let mut conn = pool.acquire().await?;
@@ -574,7 +593,8 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
     let unread: i64  = row.try_get("unread")?;
     let pub_st: &str = row.try_get("pub_status")?;
 
-    let status = if read < 5 {
+    let total:  i64  = row.try_get("total")?;
+    let status = if looked_into(read, total) {
         Status::LookedInto
     } else if unread > 0 {
         Status::Reading
@@ -812,6 +832,54 @@ pub(crate) mod tests {
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Completed);
         set_manhwa_status(&pool, id, &Status::Dropped, true).await.unwrap();
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Dropped);
+    }
+
+    #[test]
+    fn looked_into_rule() {
+        assert!(looked_into(0, 0));
+        assert!(looked_into(0, 3));
+        assert!(!looked_into(3, 3));
+        assert!(looked_into(3, 10));
+        assert!(!looked_into(5, 10));
+        assert!(!looked_into(4, 4));
+    }
+
+    #[tokio::test]
+    async fn short_series_fully_read_is_up_to_date() {
+        let pool = pool_or_skip!();
+        let id = insert_manhwa_with_chapters(&pool, &series(3, "https://x/short"), "mangadex").await.unwrap();
+        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::LookedInto);
+        mark_all_chapters_read(&pool, id).await.unwrap();
+        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn long_series_with_three_read_is_looked_into() {
+        let pool = pool_or_skip!();
+        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/long"), "mangadex").await.unwrap();
+        let chs = fetch_chapters(&pool, id).await.unwrap();
+        for c in &chs[..3] {
+            start_chapter(&pool, c.id).await.unwrap();
+            update_scroll(&pool, c.id, 1.0).await.unwrap();
+        }
+        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::LookedInto);
+    }
+
+    #[tokio::test]
+    async fn picker_up_to_date_sticks_even_for_completed_series() {
+        let pool = pool_or_skip!();
+        let mut s = series(3, "https://x/pick");
+        s.pub_status = "completed".into();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        apply_picker_status(&pool, id, &Status::UpToDate).await.unwrap();
+        let m = fetch_manhwa(&pool, id).await.unwrap();
+        assert_eq!(m.status, Status::UpToDate);
+        assert_eq!(m.unread, 0);
+        assert!(!m.status_override);
+        apply_picker_status(&pool, id, &Status::Dropped).await.unwrap();
+        let m = fetch_manhwa(&pool, id).await.unwrap();
+        assert_eq!(m.status, Status::Dropped);
+        assert!(m.status_override);
     }
 
     #[tokio::test]
