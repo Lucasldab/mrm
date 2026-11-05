@@ -35,64 +35,96 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 // Help overlay — `?` toggles, any key dismisses.
 // ---------------------------------------------------------------------------
 
+/// Help text for a screen, generated from the configured keys. Lists only
+/// actions the screen's key handler implements (see `App::handle_*_key`).
+pub fn help_entries(screen: &Screen, keys: &crate::config::KeysConfig) -> (&'static str, Vec<(String, String)>) {
+    let e = |k: String, d: &str| (k, d.to_string());
+    let pair = |a: &str, b: &str| format!("{a} / {b}");
+    let nav = |v: &mut Vec<(String, String)>, grid: bool| {
+        v.push(e(pair(&keys.down, "↓"), if grid { "Move down a row" } else { "Move down" }));
+        v.push(e(pair(&keys.up, "↑"), if grid { "Move up a row" } else { "Move up" }));
+        if grid {
+            v.push(e(pair(&keys.left, "←"), "Move left"));
+            v.push(e(pair(&keys.right, "→"), "Move right"));
+        }
+    };
+    let top_label = |chord: bool| if chord && keys.top == "g" { "gg".to_string() } else { keys.top.clone() };
+    let mut v: Vec<(String, String)> = Vec::new();
+    let title = match screen {
+        Screen::Library => {
+            nav(&mut v, true);
+            v.push(e(format!("{} / {}", top_label(true), keys.bottom), "Jump to first / last"));
+            v.push(e(keys.open.clone(), "Open series"));
+            v.push(e(keys.search.clone(), "Filter library (Enter/Esc to finish)"));
+            v.push(e(keys.back.clone(), "Clear filter"));
+            v.push(e(keys.sort.clone(), "Cycle sort order"));
+            v.push(e(keys.add.clone(), "Add series (search sources)"));
+            v.push(e("D".into(), "Discover feed"));
+            v.push(e(keys.poll_now.clone(), "Check sources for new chapters now"));
+            v.push(e(format!("{} {}", keys.delete, keys.delete), "Delete series (press twice; Esc cancels)"));
+            v.push(e("?".into(), "This help"));
+            v.push(e("q".into(), "Quit"));
+            "Library"
+        }
+        Screen::Detail { .. } => {
+            nav(&mut v, false);
+            v.push(e(format!("{} / {}", top_label(true), keys.bottom), "Jump to first / last chapter"));
+            v.push(e(keys.open.clone(), "Read chapter"));
+            v.push(e(keys.mark_read.clone(), "Mark chapter read"));
+            v.push(e(keys.mark_unread.clone(), "Mark chapter unread"));
+            v.push(e(keys.set_status.clone(), "Set series status"));
+            v.push(e(keys.clear_override.clone(), "Clear status override"));
+            v.push(e("R".into(), "Refresh from source (metadata + new chapters)"));
+            v.push(e(keys.back.clone(), "Back to library"));
+            v.push(e("?".into(), "This help"));
+            "Series Detail"
+        }
+        Screen::Search => {
+            v.push(e("(typing)".into(), "Type the query; other keys are text"));
+            v.push(e("Enter".into(), "Search all sources"));
+            v.push(e("Esc".into(), "Cancel a running search / back to library"));
+            nav(&mut v, true);
+            v.push(e(format!("{} / {}", keys.top, keys.bottom), "Jump to first / last result"));
+            v.push(e(keys.open.clone(), "Add selected result"));
+            v.push(e(format!("{} / {}", keys.input_mode, keys.back), "Back to the query"));
+            v.push(e("?".into(), "This help (results only)"));
+            "Add Series"
+        }
+        Screen::Discover => {
+            nav(&mut v, true);
+            v.push(e(format!("{} / {}", keys.top, keys.bottom), "Jump to first / last"));
+            v.push(e(format!("a / {}", keys.open), "Add to library"));
+            v.push(e("x".into(), "Dismiss"));
+            v.push(e(keys.back.clone(), "Back to library"));
+            v.push(e("?".into(), "This help"));
+            "Discover"
+        }
+        Screen::StatusPicker { .. } => {
+            nav(&mut v, false);
+            v.push(e(keys.open.clone(), "Apply (Up to date marks all chapters read)"));
+            v.push(e(keys.back.clone(), "Cancel"));
+            v.push(e("?".into(), "This help"));
+            "Status Picker"
+        }
+        Screen::Reader { .. } => {
+            v.push(e(keys.next_chapter.clone(), "Next chapter"));
+            v.push(e(keys.prev_chapter.clone(), "Previous chapter"));
+            v.push(e(keys.back.clone(), "Close viewer, back to series"));
+            v.push(e("Ctrl-C".into(), "Save progress and quit"));
+            "Reader"
+        }
+    };
+    (title, v)
+}
+
 fn draw_help_overlay(f: &mut Frame, app: &App) {
     use ratatui::text::Span;
 
     let theme = &app.theme;
     let area = f.area();
 
-    // Pick keybind set based on current screen
-    let (title, entries): (&str, Vec<(&str, &str)>) = match &app.screen {
-        Screen::Library => ("Library", vec![
-            ("j / k / ↑ / ↓", "Move selection"),
-            ("h / l / ← / →", "Grid navigation"),
-            ("g g / G",       "Jump to top / bottom"),
-            ("Enter",         "Open series detail"),
-            ("/",             "Search library"),
-            ("a",             "Add series (cross-source search)"),
-            ("d",             "Discover feed"),
-            ("s",             "Set status"),
-            ("p",             "Poll sources for new chapters now"),
-            ("x",             "Delete series"),
-            ("?",             "This help"),
-            ("q",             "Quit"),
-        ]),
-        Screen::Detail { .. } => ("Series Detail", vec![
-            ("j / k / ↑ / ↓", "Select chapter"),
-            ("g g / G",       "Jump to first / last chapter"),
-            ("Enter",         "Read chapter"),
-            ("u",             "Mark chapter unread"),
-            ("r",             "Mark chapter read"),
-            ("s",             "Set series status"),
-            ("c",             "Clear status override"),
-            ("R",             "Refresh from source (metadata + new chapters)"),
-            ("Esc",           "Back to library"),
-            ("?",             "This help"),
-        ]),
-        Screen::Search => ("Add Series", vec![
-            ("i",     "Enter input mode (type query)"),
-            ("Enter", "Submit / select result"),
-            ("Esc",   "Exit input mode / back"),
-            ("Tab",   "Switch source"),
-            ("?",     "This help"),
-        ]),
-        Screen::Discover => ("Discover", vec![
-            ("j / k / ↑ / ↓", "Select discovery"),
-            ("h / l / ← / →", "Grid navigation"),
-            ("Enter / a",     "Add to library"),
-            ("x",             "Dismiss"),
-            ("Esc",           "Back to library"),
-            ("?",             "This help"),
-        ]),
-        Screen::StatusPicker { .. } => ("Status Picker", vec![
-            ("j / k / ↑ / ↓", "Select status"),
-            ("Enter",         "Apply"),
-            ("Esc",           "Cancel"),
-        ]),
-        Screen::Reader { .. } => ("Reader", vec![
-            ("(handled by external viewer)", ""),
-        ]),
-    };
+    let (title, entries) = help_entries(&app.screen, &app.keys);
+    let entries: Vec<(&str, &str)> = entries.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect();
 
     // Compute popup size: 60% wide, ~4 rows of chrome + 1 row per entry, max 80% tall
     let popup_w = (area.width as f32 * 0.6).clamp(40.0, 100.0) as u16;
@@ -250,4 +282,53 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use crate::config::KeysConfig;
+
+    fn text(screen: &Screen, keys: &KeysConfig) -> String {
+        help_entries(screen, keys).1.iter().map(|(k, d)| format!("{k} {d}\n")).collect()
+    }
+
+    #[test]
+    fn library_help_uses_the_configured_delete_key() {
+        let mut keys = KeysConfig::default();
+        keys.delete = "X".into();
+        keys.poll_now = "P".into();
+        let t = text(&Screen::Library, &keys);
+        assert!(t.contains("X X"), "{t}");
+        assert!(t.contains("P Check sources"), "{t}");
+        assert!(t.contains("D Discover"), "{t}");
+    }
+
+    #[test]
+    fn detail_help_lists_mark_read_unread_and_refresh() {
+        let mut keys = KeysConfig::default();
+        keys.mark_read = "m".into();
+        keys.mark_unread = "n".into();
+        let t = text(&Screen::Detail { manhwa_id: 1 }, &keys);
+        assert!(t.contains("m Mark chapter read"), "{t}");
+        assert!(t.contains("n Mark chapter unread"), "{t}");
+        assert!(t.contains("R Refresh"), "{t}");
+    }
+
+    #[test]
+    fn no_unimplemented_entries() {
+        let keys = KeysConfig::default();
+        let all: String = [
+            Screen::Library, Screen::Detail { manhwa_id: 1 }, Screen::Search,
+            Screen::Discover, Screen::StatusPicker { manhwa_id: 1 },
+        ].iter().map(|s| text(s, &keys)).collect();
+        assert!(!all.contains("Tab"), "{all}");
+        assert!(!all.contains("Switch source"));
+        // Library has no `s`/`r`/`x` bindings; Discover alone has `x`.
+        let lib = text(&Screen::Library, &keys);
+        assert!(!lib.contains("Set status") && !lib.contains("Mark") && !lib.contains("x "), "{lib}");
+        // Library `d` is delete, not Discover.
+        assert!(lib.contains("d d Delete"), "{lib}");
+        assert!(!lib.contains("d Discover"), "{lib}");
+    }
 }

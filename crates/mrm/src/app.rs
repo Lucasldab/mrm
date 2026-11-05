@@ -348,6 +348,27 @@ impl App {
         list
     }
 
+    /// Id of the series under the library cursor, if any.
+    fn selected_manhwa_id(&self) -> Option<i64> {
+        self.visible_manhwa().get(self.library_sel).map(|m| m.id)
+    }
+
+    /// Point the library cursor back at `prev_id` after the visible list was
+    /// reloaded, re-sorted or re-filtered (clamped if that series is gone).
+    fn restore_library_selection(&mut self, prev_id: Option<i64>) {
+        let ids: Vec<i64> = self.visible_manhwa().iter().map(|m| m.id).collect();
+        self.library_sel = reselect(prev_id, &ids, self.library_sel);
+    }
+
+    /// Reload the library from the database, keeping the selection on the
+    /// same series.
+    async fn reload_manhwa(&mut self) -> Result<()> {
+        let prev = self.selected_manhwa_id();
+        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+        self.restore_library_selection(prev);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Event handler
     // -----------------------------------------------------------------------
@@ -415,7 +436,7 @@ impl App {
                 }
             }
             AppEvent::DataRefreshed => {
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.reload_manhwa().await?;
                 self.cover_cache.reload_from_disk(&self.manhwa_list);
             }
             AppEvent::ScraperMsg(ev) => self.handle_scraper_event(ev).await?,
@@ -441,7 +462,7 @@ impl App {
         use crate::scraper::ScraperEvent;
         match event {
             ScraperEvent::NewChapters { titles } => {
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.reload_manhwa().await?;
                 if !titles.is_empty() {
                     let count = titles.len();
                     let preview = titles.first().map(|s| s.as_str()).unwrap_or("");
@@ -464,6 +485,12 @@ impl App {
         Ok(())
     }
 
+    /// Typing a query on the Add screen. `add_search_input_active` is only
+    /// meaningful there; it rests at `true` on every other screen.
+    fn in_search_input(&self) -> bool {
+        self.screen == Screen::Search && self.add_search_input_active
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // Help overlay: `?` toggles, any key dismisses.
         if self.show_help {
@@ -472,7 +499,7 @@ impl App {
         }
         if key.code == KeyCode::Char('?')
             && !self.search_active
-            && !self.add_search_input_active
+            && !self.in_search_input()
             && !matches!(self.screen, Screen::Reader { .. })
         {
             self.show_help = true;
@@ -514,7 +541,6 @@ impl App {
         if key.code == KeyCode::Char('g')
             && !key.modifiers.contains(KeyModifiers::SHIFT)
             && !self.search_active
-            && !self.add_search_input_active
             && matches!(self.screen, Screen::Library | Screen::Detail { .. })
         {
             self.pending_g = true;
@@ -544,10 +570,7 @@ impl App {
         let _ = std::fs::remove_file(self.cover_cache.cache_dir().join(format!("{manhwa_id}.jpg")));
         self.cover_cache.invalidate(manhwa_id);
         self.cover_protocols.remove(&manhwa_id);
-        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
-        // Keep cursor in bounds
-        let max = self.manhwa_list.len().saturating_sub(1);
-        self.library_sel = self.library_sel.min(max);
+        self.reload_manhwa().await?;
         self.confirm_delete_id = None;
         self.set_msg("Deleted");
         Ok(())
@@ -565,7 +588,7 @@ impl App {
         if let Some(id) = self.confirm_delete_id {
             if k == self.keys.delete() {
                 self.do_delete_manhwa(id).await?;
-            } else if k == KeyCode::Esc || k == self.keys.back() {
+            } else if k == KeyCode::Esc {
                 self.confirm_delete_id = None;
                 self.set_msg("Delete cancelled");
             }
@@ -575,8 +598,16 @@ impl App {
         if self.search_active {
             match k {
                 KeyCode::Esc | KeyCode::Enter => { self.search_active = false; }
-                KeyCode::Backspace => { self.search_query.pop(); self.library_sel = 0; }
-                KeyCode::Char(c)   => { self.search_query.push(c); self.library_sel = 0; }
+                KeyCode::Backspace => {
+                    let prev = self.selected_manhwa_id();
+                    self.search_query.pop();
+                    self.restore_library_selection(prev);
+                }
+                KeyCode::Char(c)   => {
+                    let prev = self.selected_manhwa_id();
+                    self.search_query.push(c);
+                    self.restore_library_selection(prev);
+                }
                 _ => {}
             }
             return Ok(());
@@ -615,8 +646,9 @@ impl App {
             self.poll_now.notify_one();
             self.set_msg("Checking sources for new chapters...");
         } else if k == self.keys.sort() {
+            let prev = self.selected_manhwa_id();
             self.sort_mode = self.sort_mode.next();
-            self.library_sel = 0;
+            self.restore_library_selection(prev);
             self.set_msg(format!("Sort: {}", self.sort_mode.label()));
         } else if k == self.keys.delete() {
             if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
@@ -624,8 +656,9 @@ impl App {
             }
         } else if k == KeyCode::Esc || k == self.keys.back() {
             if !self.search_query.is_empty() {
+                let prev = self.selected_manhwa_id();
                 self.search_query.clear();
-                self.library_sel = 0;
+                self.restore_library_selection(prev);
             }
         } else if k == self.keys.open() || k == KeyCode::Enter {
             if let Some(manhwa) = self.visible_manhwa().get(self.library_sel).copied() {
@@ -680,7 +713,7 @@ impl App {
                 db::update_scroll(&self.pool, chapter_id, 1.0).await?;
                 db::recompute_status(&self.pool, manhwa_id).await?;
                 self.refresh_detail(manhwa_id).await?;
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.reload_manhwa().await?;
                 self.set_msg("Marked as read");
             }
         } else if k == self.keys.clear_override() {
@@ -689,7 +722,7 @@ impl App {
                     db::clear_status_override(&self.pool, manhwa_id).await?;
                     db::recompute_status(&self.pool, manhwa_id).await?;
                     self.refresh_detail(manhwa_id).await?;
-                    self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                    self.reload_manhwa().await?;
                     self.set_msg("Status override cleared — auto-tracking resumed");
                 } else {
                     self.set_msg("No override active");
@@ -752,7 +785,7 @@ impl App {
         if self.screen == (Screen::Detail { manhwa_id }) {
             self.refresh_detail(manhwa_id).await?;
         }
-        self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+        self.reload_manhwa().await?;
 
         // Re-pull cover so any new artwork shows up — invalidate cached
         // protocol so the next render re-creates it from the fresh image.
@@ -829,7 +862,7 @@ impl App {
             let chosen = options[self.status_sel].clone();
             db::apply_picker_status(&self.pool, manhwa_id, &chosen).await?;
             self.refresh_detail(manhwa_id).await?;
-            self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+            self.reload_manhwa().await?;
             self.screen = Screen::Detail { manhwa_id };
             self.set_msg(format!("Status set to: {}", chosen.as_str()));
         }
@@ -848,13 +881,15 @@ impl App {
         }
 
         if self.add_search_input_active {
-            if k == KeyCode::Esc || k == self.keys.back() {
+            // Text input: only the literal Esc/Enter act, so a remapped
+            // back/open letter is typed like any other character.
+            if k == KeyCode::Esc {
                 self.screen = Screen::Library;
                 self.add_search_query.clear();
                 self.add_search_results.clear();
                 self.search_cover_protocols.clear();
                 self.add_search_input_active = true;
-            } else if k == KeyCode::Enter || k == self.keys.open() {
+            } else if k == KeyCode::Enter {
                 self.start_search();
             } else if k == KeyCode::Backspace {
                 self.add_search_query.pop();
@@ -1030,7 +1065,7 @@ impl App {
 
         match db::insert_manhwa_with_chapters(&self.pool, &series, &source).await {
             Ok(new_id) => {
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.reload_manhwa().await?;
                 // Kick off cover download for the newly added entry so it
                 // shows up on the library grid without requiring a restart.
                 tokio::spawn(crate::cover_cache::preload_covers(
@@ -1492,7 +1527,7 @@ impl App {
         let just_completed = db::update_scroll(&self.pool, chapter_id, 1.0).await?;
         if just_completed {
             db::recompute_status(&self.pool, manhwa_id).await?;
-            self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+            self.reload_manhwa().await?;
             self.refresh_detail(manhwa_id).await?;
         }
         Ok(())
@@ -1622,7 +1657,7 @@ impl App {
         match db::insert_manhwa_with_chapters(&self.pool, &series, &source).await {
             Ok(new_id) => {
                 let _ = db::delete_discovery(&self.pool, discovery_id).await;
-                self.manhwa_list = db::fetch_all_manhwa(&self.pool).await?;
+                self.reload_manhwa().await?;
                 tokio::spawn(crate::cover_cache::preload_covers(
                     self.cover_cache.cache_dir().clone(),
                     vec![(new_id, series.cover_url.clone())],
@@ -1899,6 +1934,17 @@ pub fn msg_expired(set_at: Instant, now: Instant, ttl: Duration) -> bool {
     now.saturating_duration_since(set_at) >= ttl
 }
 
+/// Where the library cursor goes after the visible list changed: the same
+/// series if it is still shown, else the old index clamped into the list.
+pub(crate) fn reselect(prev_id: Option<i64>, visible_ids: &[i64], prev_index: usize) -> usize {
+    if let Some(id) = prev_id {
+        if let Some(i) = visible_ids.iter().position(|&v| v == id) {
+            return i;
+        }
+    }
+    prev_index.min(visible_ids.len().saturating_sub(1))
+}
+
 #[cfg(test)]
 mod msg_tests {
     use super::*;
@@ -1932,6 +1978,29 @@ pub fn should_mark_complete(
     pages_total: usize,
 ) -> bool {
     user_closed && loading_done && pages_total > 0 && pages_ok == pages_total
+}
+
+#[cfg(test)]
+mod reselect_tests {
+    use super::reselect;
+
+    #[test]
+    fn follows_the_series_when_the_order_changes() {
+        assert_eq!(reselect(Some(7), &[3, 9, 7, 1], 0), 2);
+    }
+
+    #[test]
+    fn clamps_when_the_series_is_gone() {
+        assert_eq!(reselect(Some(7), &[3, 9], 2), 1);
+        assert_eq!(reselect(Some(7), &[3, 9, 1], 1), 1);
+    }
+
+    #[test]
+    fn empty_list_and_no_previous_selection() {
+        assert_eq!(reselect(Some(7), &[], 4), 0);
+        assert_eq!(reselect(None, &[5, 6, 8], 9), 2);
+        assert_eq!(reselect(None, &[5, 6, 8], 1), 1);
+    }
 }
 
 #[cfg(test)]
@@ -2173,6 +2242,60 @@ mod task_tests {
         }).await.unwrap();
         assert!(app.add_search_error.is_none(), "cancelled search result was applied");
         assert!(app.add_search_input_active);
+    }
+
+    fn press(c: KeyCode) -> AppEvent { AppEvent::Key(KeyEvent::new(c, KeyModifiers::NONE)) }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_outside_the_search_input() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        assert!(app.add_search_input_active, "rests at true off the Search screen");
+        app.handle_event(press(KeyCode::Char('?'))).await.unwrap();
+        assert!(app.show_help);
+        app.handle_event(press(KeyCode::Char('x'))).await.unwrap();
+        assert!(!app.show_help);
+        // Typing '?' into the Add query must not open help.
+        app.screen = Screen::Search;
+        app.handle_event(press(KeyCode::Char('?'))).await.unwrap();
+        assert!(!app.show_help);
+        assert_eq!(app.add_search_query, "?");
+    }
+
+    #[tokio::test]
+    async fn remapped_back_and_open_letters_are_typed_in_the_search_input() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        app.keys.back = "h".into();
+        app.keys.open = "l".into();
+        app.screen = Screen::Search;
+        for c in "hello".chars() {
+            app.handle_event(press(KeyCode::Char(c))).await.unwrap();
+        }
+        assert_eq!(app.screen, Screen::Search);
+        assert_eq!(app.add_search_query, "hello");
+        assert!(!app.add_search_loading);
+        app.handle_event(press(KeyCode::Esc)).await.unwrap();
+        assert_eq!(app.screen, Screen::Library);
+    }
+
+    #[tokio::test]
+    async fn library_selection_follows_the_series_across_a_reload() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        for (i, t) in ["a", "b", "c"].iter().enumerate() {
+            let mut s = crate::db::tests::series(1, &format!("https://x/sel{i}"));
+            s.title = t.to_string();
+            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        }
+        app.reload_manhwa().await.unwrap();
+        app.sort_mode = SortMode::Title;
+        app.library_sel = 1;
+        let id = app.selected_manhwa_id().unwrap();
+        // A new series sorting before the selection shifts it down one.
+        let mut s = crate::db::tests::series(1, "https://x/sel-new");
+        s.title = "0".into();
+        crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        app.reload_manhwa().await.unwrap();
+        assert_eq!(app.library_sel, 2);
+        assert_eq!(app.selected_manhwa_id(), Some(id));
     }
 
     #[tokio::test]

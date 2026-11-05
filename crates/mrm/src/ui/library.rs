@@ -16,8 +16,27 @@ const CELL_HEIGHT: u16 = 16; // rows per cell (image area + 2 text lines)
 const IMG_WIDTH: u16 = 18;   // image width within cell (centered)
 const IMG_HEIGHT: u16 = 12;  // fixed image height
 
+/// Everything a grid cell needs, copied out once per frame so drawing never
+/// re-runs the filter + sort and doesn't hold a borrow on `app`.
+struct CellData {
+    id: i64,
+    title: String,
+    cover_url: Option<String>,
+    status: crate::types::Status,
+    unread: u32,
+    status_display: String,
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    let cells: Vec<CellData> = app.visible_manhwa().into_iter().map(|m| CellData {
+        id: m.id,
+        title: m.title.clone(),
+        cover_url: m.cover_url.clone(),
+        status: m.status.clone(),
+        unread: m.unread,
+        status_display: m.status_display(),
+    }).collect();
 
     // Split: main grid | right sidebar (keybinds)
     let cols = Layout::default()
@@ -47,18 +66,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Title bar
-    let visible = app.visible_manhwa();
     let title = if app.search_query.is_empty() {
-        format!(" mrm — {} manhwa ", visible.len())
+        format!(" mrm — {} manhwa ", cells.len())
     } else {
-        format!(" mrm — {} results ", visible.len())
+        format!(" mrm — {} results ", cells.len())
     };
     let title_bar = Paragraph::new(title)
         .style(Style::default().fg(app.theme.text_bold()).add_modifier(Modifier::BOLD));
     f.render_widget(title_bar, rows[1]);
 
     // Grid area
-    draw_grid(f, app, rows[2]);
+    draw_grid(f, app, &cells, rows[2]);
 
     // Bottom status bar
     draw_statusbar(f, app, rows[3]);
@@ -72,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_grid(f: &mut Frame, app: &mut App, cells: &[CellData], area: Rect) {
     if area.width < CELL_WIDTH || area.height < CELL_HEIGHT {
         let msg = Paragraph::new("Terminal too small")
             .style(Style::default().fg(Color::DarkGray))
@@ -81,7 +99,7 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let total = app.visible_manhwa().len();
+    let total = cells.len();
     if total == 0 {
         let msg = Paragraph::new("No manhwa yet. Press 'a' to add one.")
             .style(Style::default().fg(Color::DarkGray))
@@ -131,21 +149,14 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
             let cell_area = Rect::new(cell_x, cell_y, CELL_WIDTH, CELL_HEIGHT);
             let is_selected = idx == sel;
 
-            draw_cell(f, app, cell_area, idx, is_selected);
+            draw_cell(f, app, &cells[idx], cell_area, is_selected);
         }
     }
 }
 
-fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: bool) {
-    // Collect needed data before mutably borrowing app for cover rendering
-    let manhwa_data = {
-        let visible = app.visible_manhwa();
-        visible.get(idx).map(|m| (m.id, m.title.clone(), m.cover_url.clone(), m.status.clone(), m.unread, m.status_display()))
-    };
-    let (manhwa_id, title, cover_url, status, unread, status_display) = match manhwa_data {
-        Some(d) => d,
-        None => return,
-    };
+fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selected: bool) {
+    let CellData { id: manhwa_id, title, cover_url, status, unread, status_display } = cell;
+    let (manhwa_id, unread) = (*manhwa_id, *unread);
 
     if area.width < 4 || area.height < 4 {
         return;
@@ -184,9 +195,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
     };
 
     render_cover(f, app, img_area, manhwa_id, cover_url.as_deref());
-    render_title_text(f, txt_area, &title, is_selected, &app.theme);
+    render_title_text(f, txt_area, title, is_selected, &app.theme);
     if sts_area.width > 0 {
-        render_status_line(f, sts_area, &status, unread, &status_display, &app.theme);
+        render_status_line(f, sts_area, status, unread, status_display, &app.theme);
     }
 }
 
