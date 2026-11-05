@@ -56,7 +56,7 @@ pub async fn coordinator_task(
     scraper_tx: mpsc::Sender<ScraperEvent>,
     quiet: bool,
 ) {
-    let interval_secs = config.notifications.poll_interval_minutes * 60;
+    let interval_secs = config.notifications.poll_interval_minutes.max(1) * 60;
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Consume the immediate first tick so the first real poll happens after the interval.

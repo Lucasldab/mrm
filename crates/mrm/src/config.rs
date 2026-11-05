@@ -507,8 +507,17 @@ pub fn load_config() -> Result<Config> {
         .with_context(|| "config.toml not found in CWD or ~/.config/mrm/")?;
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let config: Config = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    parse_config(&contents)
+        .with_context(|| format!("Invalid config file: {}", path.display()))
+}
+
+/// Parse and validate config text. The TOML error (with line/column) is kept
+/// in the chain so `{e:#}` shows it.
+pub fn parse_config(contents: &str) -> Result<Config> {
+    let config: Config = toml::from_str(contents)?;
+    if config.notifications.poll_interval_minutes == 0 {
+        anyhow::bail!("notifications.poll_interval_minutes must be at least 1 (got 0)");
+    }
     Ok(config)
 }
 
@@ -571,5 +580,24 @@ mod db_url_tests {
     fn config_without_db_section_parses() {
         let c: Config = toml::from_str("[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n").unwrap();
         assert!(c.db.url_file.is_none());
+    }
+
+    #[test]
+    fn zero_poll_interval_is_rejected() {
+        let e = parse_config("[notifications]\nenabled = false\npoll_interval_minutes = 0\n[sources]\n").unwrap_err();
+        assert!(format!("{e:#}").contains("poll_interval_minutes"), "{e:#}");
+    }
+
+    #[test]
+    fn syntax_error_reports_line_and_column() {
+        let e = parse_config("[notifications\nenabled = false\n").unwrap_err();
+        let m = format!("{e:#}");
+        assert!(m.contains("line 1") && m.contains("column"), "{m}");
+    }
+
+    #[test]
+    fn valid_config_parses_via_parse_config() {
+        let c = parse_config("[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n").unwrap();
+        assert_eq!(c.notifications.poll_interval_minutes, 30);
     }
 }
