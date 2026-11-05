@@ -73,8 +73,9 @@ static CHAPTER_PATH_RE: LazyLock<Regex> = LazyLock::new(||
 static CHAPTER_NUM_RE: LazyLock<Regex> = LazyLock::new(||
     Regex::new(r"/chapter/([\d]+(?:\.[\d]+)?)").unwrap()
 );
+// Any host: the CDN has been renamed before (L13).
 static IMAGE_URL_RE: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r#"https://cdn\.asurascans\.com/asura-images/chapters/[^"\s<>]+\.(?:webp|jpg|jpeg|png)"#).unwrap()
+    Regex::new(r#"https://[^"\s<>]+/chapters/[^"\s<>]+\.(?:webp|jpe?g|png|avif)"#).unwrap()
 );
 
 // Two known serialized chapter-block formats embedded in Astro's HTML-encoded
@@ -165,9 +166,16 @@ fn series_path(source_url: &str) -> String {
 }
 
 /// Strip the rotating 8-hex-char hash suffix from a series slug.
-fn series_slug(path: &str) -> String {
+pub(crate) fn series_slug(path: &str) -> String {
     let last = path.rsplit('/').next().unwrap_or("");
     HASH_SUFFIX_RE.replace(last, "").into_owned()
+}
+
+/// A series' identity across host moves and hash rotations: the last path
+/// segment without its `-hash8` suffix. Kept in step with
+/// `db::ASURA_SLUG_SQL`.
+pub(crate) fn slug_key(url: &str) -> String {
+    series_slug(&series_path(url))
 }
 
 /// Decode HTML entities used by Astro's serialized state (just the subset we
@@ -248,24 +256,15 @@ impl Scraper for AsuraScraper {
 
     async fn get_series(&self, source_url: &str) -> Result<SeriesData> {
         let (final_url, body) = fetch(&self.client, source_url).await?;
-        let data = parse_series(source_url, &final_url, &body);
+        let data = parse_series(source_url, &final_url, &body)?;
         sleep(DELAY).await;
         Ok(data)
     }
 
     async fn get_chapter_image_urls(&self, chapter_url: &str) -> Result<Vec<String>> {
         let (_, body) = fetch(&self.client, chapter_url).await?;
-
-        // Image URLs are embedded inside Astro's HTML-encoded serialized state.
-        let decoded = html_unescape(&body);
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = Vec::new();
-        for m in IMAGE_URL_RE.find_iter(&decoded) {
-            let u = m.as_str().to_string();
-            if seen.insert(u.clone()) {
-                out.push(u);
-            }
-        }
+        let out = parse_chapter_images(&body)
+            .with_context(|| format!("Asura chapter {chapter_url}"))?;
         sleep(DELAY).await;
         Ok(out)
     }
@@ -318,37 +317,67 @@ fn parse_search(body: &str) -> Vec<SearchResult> {
     results
 }
 
-fn parse_series(source_url: &str, final_url: &str, body: &str) -> SeriesData {
+/// Image URLs embedded in Astro's HTML-encoded serialized state, in page
+/// order, deduplicated. No match means the page did not parse (interstitial,
+/// layout or CDN change): an error, not an empty chapter.
+fn parse_chapter_images(body: &str) -> Result<Vec<String>> {
+    let decoded = html_unescape(body);
+    let mut seen: HashSet<&str> = HashSet::new();
+    let out: Vec<String> = IMAGE_URL_RE.find_iter(&decoded)
+        .map(|m| m.as_str())
+        .filter(|u| seen.insert(u))
+        .map(str::to_string)
+        .collect();
+    if out.is_empty() {
+        anyhow::bail!("no chapter image URLs found on the page");
+    }
+    Ok(out)
+}
+
+/// Parse a series page fetched from `source_url` that ended at `final_url`
+/// after redirects. A page without an `<h1>` title or without any chapter
+/// anchors for this series (Cloudflare interstitial served with 200, soft
+/// 404, layout change) is an error, so it can't blank the stored series.
+fn parse_series(source_url: &str, final_url: &str, body: &str) -> Result<SeriesData> {
     let tree = Html::parse_document(body);
 
-    let title = tree.select(&SEL_H1).next()
-        .map(|h1| h1.text().collect::<String>().trim().to_string())
-        .unwrap_or_default();
+    let h1 = tree.select(&SEL_H1)
+        .find(|h1| !h1.text().collect::<String>().trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Asura: no <h1> title at {source_url}"))?;
+    let title = h1.text().collect::<String>().trim().to_string();
 
     let cover_url = cover_img(&tree.root_element()).map(|(_, url)| url);
 
-    let status = tree.select(&SEL_SPAN)
-        .filter_map(|span| {
-            let t = span.text().collect::<String>().trim().to_lowercase();
-            map_status(&t).map(|s| s.to_string())
-        })
-        .next()
-        .unwrap_or_else(|| "ongoing".to_string());
+    // The status nearest the title: the smallest ancestor of the <h1> holding
+    // a status word. Filter menus and sidebar cards elsewhere don't count.
+    let status = h1.ancestors()
+        .filter_map(scraper::ElementRef::wrap)
+        .take_while(|el| !matches!(el.value().name(), "body" | "html"))
+        .find_map(|block| block.select(&SEL_SPAN).find_map(|span| {
+            map_status(&span.text().collect::<String>())
+        }))
+        .unwrap_or("ongoing")
+        .to_string();
 
     let path = series_path(final_url);
     let locked = parse_locked_chapters(body, &path);
     let mut chapters = parse_chapter_links(&tree, &path);
+    if chapters.is_empty() {
+        anyhow::bail!("Asura: no chapter links for {path} at {source_url}");
+    }
     chapters.retain(|c| !locked.contains(&c.number.to_bits()));
     chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
 
-    SeriesData {
+    Ok(SeriesData {
         title,
         cover_url,
-        source_url: source_url.to_string(),
+        // Post-redirect: AsuraScans rotates the -hash8 suffix and moves hosts;
+        // the poll path stores this so the old redirect chain can die (L12).
+        source_url: final_url.to_string(),
         pub_status: status,
         description: None,
         chapters,
-    }
+    })
 }
 
 fn parse_latest_chapters(body: &str) -> Vec<DiscoveryEntry> {
@@ -543,5 +572,87 @@ mod tests {
         </div></body></html>"#;
         let r = parse_search(html);
         assert_eq!(r[0].cover_url.as_deref(), Some("https://cdn.x/covers/tog.webp"));
+    }
+
+    // --- M7: unparsable pages are errors, status is scoped ---
+
+    const OLD: &str = "https://asurascans.com/comics/solo-leveling-1a2b3c4d";
+    const NEW: &str = "https://asurascans.com/comics/solo-leveling-9f8e7d6c";
+
+    fn series_page(status_sidebar: &str, status_info: &str) -> String {
+        format!(r#"<html><body>
+            <aside><span>{status_sidebar}</span><a href="/comics/other-00000000/chapter/9">Chapter 9</a></aside>
+            <main><div class="info">
+              <img src="https://cdn.x/covers/solo.webp">
+              <h1>Solo Leveling</h1>
+              <div><span>Status</span><span>{status_info}</span></div>
+            </div>
+            <div class="chapters">
+              <a href="/comics/solo-leveling-9f8e7d6c/chapter/1"><span class="truncate">Chapter 1</span></a>
+              <a href="/comics/solo-leveling-9f8e7d6c/chapter/2"><span class="truncate">Chapter 2</span></a>
+            </div></main>
+        </body></html>"#)
+    }
+
+    #[test]
+    fn cloudflare_interstitial_is_an_error() {
+        let html = r#"<html><head><title>Just a moment...</title></head>
+            <body><div id="challenge-running">Checking your browser</div></body></html>"#;
+        assert!(parse_series(OLD, OLD, html).is_err());
+    }
+
+    #[test]
+    fn page_without_chapter_anchors_is_an_error() {
+        let html = r#"<html><body><h1>Solo Leveling</h1><span>Completed</span></body></html>"#;
+        assert!(parse_series(OLD, OLD, html).is_err());
+    }
+
+    #[test]
+    fn status_comes_from_the_info_block_not_the_sidebar() {
+        let s = parse_series(OLD, NEW, &series_page("Completed", "Ongoing")).unwrap();
+        assert_eq!(s.title, "Solo Leveling");
+        assert_eq!(s.pub_status, "ongoing");
+        assert_eq!(s.chapters.len(), 2);
+        let s = parse_series(OLD, NEW, &series_page("Ongoing", "Completed")).unwrap();
+        assert_eq!(s.pub_status, "completed");
+    }
+
+    // --- L12: redirects are persisted, slugs compare without the hash ---
+
+    #[test]
+    fn series_reports_the_post_redirect_url() {
+        let s = parse_series(OLD, NEW, &series_page("", "Ongoing")).unwrap();
+        assert_eq!(s.source_url, NEW);
+    }
+
+    #[test]
+    fn slug_key_ignores_host_and_hash_suffix() {
+        assert_eq!(slug_key(OLD), "solo-leveling");
+        assert_eq!(slug_key(&format!("{NEW}/")), "solo-leveling");
+        assert_eq!(slug_key("https://asuracomic.net/series/solo-leveling-abcdef12/"), "solo-leveling");
+        assert_ne!(slug_key("https://asurascans.com/comics/solo-leveling-2-1a2b3c4d"), "solo-leveling");
+    }
+
+    // --- L13: image URLs on any CDN host, empty is an error ---
+
+    #[test]
+    fn chapter_images_match_any_cdn_host() {
+        let body = r#"<script>{&quot;pages&quot;:[&quot;https://img.newcdn.example/asura/chapters/abc/001.webp&quot;,
+            &quot;https://img.newcdn.example/asura/chapters/abc/002.avif&quot;,
+            &quot;https://img.newcdn.example/asura/chapters/abc/001.webp&quot;,
+            &quot;https://cdn.asurascans.com/asura-images/chapters/abc/003.jpeg&quot;]}</script>"#;
+        assert_eq!(
+            parse_chapter_images(body).unwrap(),
+            vec![
+                "https://img.newcdn.example/asura/chapters/abc/001.webp".to_string(),
+                "https://img.newcdn.example/asura/chapters/abc/002.avif".to_string(),
+                "https://cdn.asurascans.com/asura-images/chapters/abc/003.jpeg".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn chapter_page_without_images_is_an_error() {
+        assert!(parse_chapter_images("<html><body>Just a moment...</body></html>").is_err());
     }
 }

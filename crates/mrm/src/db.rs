@@ -371,6 +371,20 @@ pub async fn apply_poll_result(
 ) -> Result<usize> {
     let mut tx = pool.begin().await?;
     let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &series.chapters).await?;
+    // Follow a source-side move (Asura reports its post-redirect URL), so the
+    // stored URL doesn't depend on the redirect chain staying alive. Skipped
+    // when another library row already holds the new URL (UNIQUE).
+    sqlx::query(
+        r#"
+        UPDATE manhwa SET source_url = $1
+        WHERE id = $2 AND source_url <> $1
+          AND NOT EXISTS (SELECT 1 FROM manhwa WHERE source_url = $1)
+        "#,
+    )
+    .bind(&series.source_url)
+    .bind(manhwa_id)
+    .execute(&mut *tx)
+    .await?;
     let pub_changed = series.pub_status != old_pub_status;
     if pub_changed {
         update_pub_status_conn(&mut tx, manhwa_id, &series.pub_status).await?;
@@ -501,7 +515,7 @@ pub async fn update_manhwa_metadata(
     sqlx::query(
         r#"
         UPDATE manhwa
-        SET title       = $1,
+        SET title       = COALESCE(NULLIF($1, ''), title),
             cover_url   = COALESCE($2, cover_url),
             pub_status  = $3,
             description = COALESCE($4, description),
@@ -621,6 +635,11 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
 // Discovery queries
 // ---------------------------------------------------------------------------
 
+/// SQL twin of `scraper::asura::slug_key` over a `source_url` column: last
+/// path segment, trailing `/` ignored, `-hash8` suffix stripped.
+const ASURA_SLUG_SQL: &str =
+    r"regexp_replace(regexp_replace(rtrim(source_url, '/'), '^.*/', ''), '-[0-9a-f]{8}$', '')";
+
 /// Insert a discovered entry if not already known in either library or
 /// discoveries. Returns true if a new row was inserted.
 pub async fn upsert_discovery(
@@ -632,17 +651,55 @@ pub async fn upsert_discovery(
     chapter_number: Option<f64>,
     released_at: Option<&str>,
 ) -> Result<bool> {
+    // Asura rotates the -hash8 suffix (and has moved hosts), so its series
+    // are matched by slug; other sources by exact URL.
+    let slug: Option<String> = (source == "asura")
+        .then(|| crate::scraper::asura::slug_key(source_url))
+        .filter(|k| !k.is_empty());
+
     // Skip if already in library
-    let in_lib: bool = sqlx::query(
-        "SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = $1)",
-    )
+    let in_lib: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = $1 \
+           OR ($2::text IS NOT NULL AND source = 'asura' AND {ASURA_SLUG_SQL} = $2))"
+    ))
     .bind(source_url)
+    .bind(&slug)
     .fetch_one(pool)
-    .await?
-    .try_get::<bool, _>(0)
-    .unwrap_or(false);
+    .await?;
     if in_lib {
         return Ok(false);
+    }
+
+    // Known under another hash: move that row to the current URL, keeping
+    // its dismissed flag, instead of surfacing the series again.
+    if let Some(slug) = &slug {
+        let moved = sqlx::query(&format!(
+            r#"
+            UPDATE discovered_manhwa SET
+                source_url     = $1,
+                title          = $3,
+                cover_url      = COALESCE($4, cover_url),
+                chapter_number = COALESCE($5, chapter_number),
+                released_at    = COALESCE($6, released_at)
+            WHERE id = (
+                SELECT id FROM discovered_manhwa
+                WHERE source = 'asura' AND {ASURA_SLUG_SQL} = $2 AND source_url <> $1
+                ORDER BY id LIMIT 1
+            )
+              AND NOT EXISTS (SELECT 1 FROM discovered_manhwa WHERE source_url = $1)
+            "#
+        ))
+        .bind(source_url)
+        .bind(slug)
+        .bind(title)
+        .bind(cover_url)
+        .bind(chapter_number)
+        .bind(released_at)
+        .execute(pool)
+        .await?;
+        if moved.rows_affected() > 0 {
+            return Ok(false);
+        }
     }
 
     // xmax = 0 only on a freshly inserted row, so RETURNING tells INSERT from
@@ -983,5 +1040,68 @@ pub(crate) mod tests {
         let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapter WHERE notified_at IS NULL")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(pending, 0);
+    }
+
+    // --- M7: an empty scraped title never blanks the stored one ---
+
+    #[tokio::test]
+    async fn metadata_refresh_with_empty_title_keeps_the_old_one() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, "https://x/t");
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
+        s.title = String::new();
+        update_manhwa_metadata(&pool, id, &s).await.unwrap();
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().title, "Series https://x/t");
+        s.title = "Renamed".into();
+        update_manhwa_metadata(&pool, id, &s).await.unwrap();
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().title, "Renamed");
+    }
+
+    // --- L12: redirects persisted; Asura discoveries compare by slug ---
+
+    const ASURA_OLD: &str = "https://asurascans.com/comics/solo-leveling-1a2b3c4d";
+    const ASURA_NEW: &str = "https://asurascans.com/comics/solo-leveling-9f8e7d6c";
+
+    #[tokio::test]
+    async fn poll_stores_the_post_redirect_source_url() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, ASURA_OLD);
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
+        s.source_url = ASURA_NEW.into();
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().source_url, ASURA_NEW);
+    }
+
+    #[tokio::test]
+    async fn poll_redirect_onto_an_existing_row_keeps_both_and_succeeds() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, ASURA_OLD);
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
+        insert_manhwa_with_chapters(&pool, &series(1, ASURA_NEW), "asura").await.unwrap();
+        s.source_url = ASURA_NEW.into();
+        s.chapters = vec![ch(2.0, ASURA_OLD)];
+        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 1);
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().source_url, ASURA_OLD);
+    }
+
+    #[tokio::test]
+    async fn asura_discovery_ignores_hash_rotation() {
+        let pool = pool_or_skip!();
+        // In the library under the old hash: the rotated URL is not new.
+        insert_manhwa_with_chapters(&pool, &series(1, ASURA_OLD), "asura").await.unwrap();
+        assert!(!upsert_discovery(&pool, "asura", ASURA_NEW, "SL", None, None, None).await.unwrap());
+        assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
+
+        // Dismissed under one hash, re-surfaced under another: stays dismissed.
+        let a = "https://asurascans.com/comics/tower-of-god-00aa11bb";
+        let b = "https://asuracomic.net/series/tower-of-god-22cc33dd/";
+        assert!(upsert_discovery(&pool, "asura", a, "ToG", None, Some(1.0), None).await.unwrap());
+        let d = fetch_discoveries(&pool).await.unwrap();
+        dismiss_discovery(&pool, d[0].id).await.unwrap();
+        assert!(!upsert_discovery(&pool, "asura", b, "ToG", None, Some(2.0), None).await.unwrap());
+        assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
+
+        // Other sources still compare exact URLs.
+        assert!(upsert_discovery(&pool, "mangack", "https://m/manga/solo-leveling-1a2b3c4d/", "SL", None, None, None).await.unwrap());
     }
 }
