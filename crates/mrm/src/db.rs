@@ -360,17 +360,6 @@ async fn upsert_chapters_conn(
     Ok(inserted)
 }
 
-pub async fn upsert_chapters(
-    pool: &PgPool,
-    manhwa_id: i64,
-    chapters: &[crate::scraper::ChapterData],
-) -> Result<usize> {
-    let mut tx = pool.begin().await?;
-    let n = upsert_chapters_conn(&mut tx, manhwa_id, chapters).await?;
-    tx.commit().await?;
-    Ok(n)
-}
-
 /// One poll result for one series, atomically: chapters, pub_status, and the
 /// status recompute (only when something it depends on changed). A crash
 /// mid-way leaves nothing half-written (SCAN.md risks 1 and 3).
@@ -397,13 +386,19 @@ pub async fn apply_poll_result(
 /// (row locks make concurrent claims disjoint). Returns (title, count) for the
 /// claimed chapters the user has not started; started/read ones are claimed
 /// silently. Only notifying pollers call this - never the TUI's quiet poller.
+/// Claim precedes the push: a failed push is not retried (at-most-once).
+/// Rows are locked in id order and locked ones skipped, so a concurrent poll
+/// transaction cannot deadlock with the claim.
 pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<(String, i64)>> {
     let rows = sqlx::query(
         r#"
-        WITH claimed AS (
+        WITH c AS (
+            SELECT id FROM chapter WHERE notified_at IS NULL ORDER BY id FOR UPDATE SKIP LOCKED
+        ),
+        claimed AS (
             UPDATE chapter SET notified_at = now()
-            WHERE notified_at IS NULL
-            RETURNING id, manhwa_id
+            FROM c WHERE chapter.id = c.id
+            RETURNING chapter.id, chapter.manhwa_id
         )
         SELECT m.title, COUNT(*) AS n
         FROM claimed c
@@ -522,16 +517,6 @@ pub async fn update_manhwa_metadata(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-/// Update stored pub_status when a scraper reports a change.
-pub async fn update_pub_status(
-    pool: &PgPool,
-    manhwa_id: i64,
-    pub_status: &str,
-) -> Result<()> {
-    let mut conn = pool.acquire().await?;
-    update_pub_status_conn(&mut conn, manhwa_id, pub_status).await
 }
 
 pub(crate) async fn update_pub_status_conn(
@@ -675,7 +660,7 @@ pub async fn fetch_discoveries(pool: &PgPool) -> Result<Vec<Discovery>> {
                chapter_number, released_at, first_seen_at::text AS first_seen_at
         FROM discovered_manhwa
         WHERE dismissed = FALSE
-        ORDER BY first_seen_at DESC, id DESC
+        ORDER BY discovered_manhwa.first_seen_at DESC, id DESC
         "#,
     )
     .fetch_all(pool)
@@ -821,7 +806,9 @@ pub(crate) mod tests {
         assert!(update_scroll(&pool, chs[5].id, 1.0).await.unwrap());
         assert!(!update_scroll(&pool, chs[5].id, 1.0).await.unwrap());
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
-        update_pub_status(&pool, id, "completed").await.unwrap();
+        let mut done = series(6, "https://x/b");
+        done.pub_status = "completed".into();
+        apply_poll_result(&pool, id, &done, "ongoing").await.unwrap();
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Completed);
         set_manhwa_status(&pool, id, &Status::Dropped, true).await.unwrap();
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Dropped);
@@ -891,6 +878,27 @@ pub(crate) mod tests {
         let (a, b) = tokio::join!(claim_unnotified(&pool), claim_unnotified(&pool));
         let total: i64 = a.unwrap().iter().chain(b.unwrap().iter()).map(|(_, n)| n).sum();
         assert_eq!(total, 20);
+    }
+
+    #[tokio::test]
+    async fn claim_skips_rows_locked_by_a_poll() {
+        let pool = pool_or_skip!();
+        let mut s = series(1, "https://x/lk");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        s.chapters.push(ch(2.0, "https://x/lk"));
+        s.chapters.push(ch(3.0, "https://x/lk"));
+        apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
+        // A concurrent poll transaction holds a lock on one unnotified chapter.
+        let mut tx = pool.begin().await.unwrap();
+        let locked: i64 = sqlx::query_scalar(
+            "SELECT id FROM chapter WHERE manhwa_id = $1 AND number = 2 FOR UPDATE")
+            .bind(id).fetch_one(&mut *tx).await.unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), claim_unnotified(&pool))
+            .await.expect("claim must not block on locked rows").unwrap();
+        assert_eq!(got, vec![(s.title.clone(), 1)]);
+        tx.rollback().await.unwrap();
+        let again = claim_unnotified(&pool).await.unwrap();
+        assert_eq!(again, vec![(s.title.clone(), 1)], "skipped row {locked} is claimed next time");
     }
 
     #[tokio::test]

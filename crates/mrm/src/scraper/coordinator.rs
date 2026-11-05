@@ -161,7 +161,9 @@ async fn poll_all(
     // Notifying pollers (daemon) announce whatever no poller has announced yet,
     // including chapters a laptop's quiet poller inserted first. The quiet TUI
     // poller never claims, so it cannot swallow the phone push.
-    if !quiet {
+    if !quiet && !notifier::can_push(&config.notifications) {
+        log!("mrm: no ntfy sink in this build/config — leaving chapters for the notifying host");
+    } else if !quiet {
         match db::claim_unnotified(pool).await {
             Ok(claimed) if !claimed.is_empty() && config.notifications.enabled => {
                 let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();

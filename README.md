@@ -20,7 +20,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 
 ## Requirements
 
-- Rust 1.70+
+- Rust 1.88+ (the highest `rust-version` declared by the direct dependencies I checked: ratatui 0.30 = 1.88, ratatui-image = 1.86, rquest 5 = 1.85; sqlx 0.7 declares none; transitive crates not exhaustively checked)
 - PostgreSQL 14+ (see [Database](#database))
 - cmake and clang (see [Build dependencies](#build-dependencies))
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
@@ -98,7 +98,7 @@ Several machines can share one database, but only the host that sends notificati
 
 ### Migrations are additive only
 
-Migrations only add tables, columns and indexes. Older binaries ignore migrations they do not know (`set_ignore_missing`), so a machine that has not been updated keeps working after another one migrated the database. Never write a migration that drops or renames something.
+Migrations only add tables, columns and indexes. Older binaries ignore migrations they do not know (`set_ignore_missing`), so a machine that has not been updated keeps working after another one migrated the database. Never drop or rename columns or tables; relaxing a constraint is fine.
 
 ### Tests
 
@@ -163,9 +163,9 @@ priority = "default"                  # optional: min|low|default|high|max
 
 ### Notification model
 
-Only non-quiet pollers (`mrm --daemon`, `mrm --once`) notify; the TUI's poller never does. New chapters are claimed in the database (`chapter.notified_at`) in one UPDATE, so each chapter is announced exactly once even with several machines. Chapters that arrive together with a newly added series are never announced, and chapters you have already read are claimed silently. The claim happens before the push, so a failed push is not retried (at-most-once delivery).
+Only non-quiet pollers (`mrm --daemon`, `mrm --once`) on a build that can push claim and notify; the TUI's poller never does. New chapters are claimed in the database (`chapter.notified_at`) in one UPDATE, so each chapter is announced exactly once even with several machines. Chapters that arrive together with a newly added series are never announced, and chapters you have already read are claimed silently. The claim happens before the push, so a failed push is not retried (at-most-once delivery).
 
-Run `mrm --daemon` (or `mrm --once`) and new chapters now fan out to both the desktop and your phone. The block is silently ignored on builds without the `ntfy` feature, so the same `config.toml` works on machines that opt out.
+Only the host built with `make build-daemon` and an enabled `[notifications.ntfy]` block claims new chapters and pushes them to your phone (plus a desktop pop-up there). Builds without the `ntfy` feature never claim: they log that they are leaving the chapters for the notifying host, so the same `config.toml` works on machines that opt out.
 
 ## Theme
 

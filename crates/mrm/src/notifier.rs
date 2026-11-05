@@ -12,6 +12,14 @@ use notify_rust::Notification;
 
 use crate::config::NotificationsConfig;
 
+/// True only when this build and config can push to the phone: the `ntfy`
+/// feature is compiled in and an enabled `[notifications.ntfy]` block exists.
+/// Only such a host may claim chapters (`db::claim_unnotified`); anyone else
+/// leaves them for the notifying host.
+pub fn can_push(n: &NotificationsConfig) -> bool {
+    cfg!(feature = "ntfy") && n.ntfy.as_ref().is_some_and(|c| c.enabled)
+}
+
 /// Send a grouped desktop notification for newly-updated manhwa titles.
 ///
 /// - Empty slice → no-op.
@@ -107,6 +115,44 @@ mod tests {
         assert_eq!(s, "10 manhwa updated");
         assert!(b.ends_with("…and 2 more"));
         assert_eq!(b.matches('•').count(), 8);
+    }
+
+    fn notif(ntfy: Option<crate::config::NtfyConfig>) -> NotificationsConfig {
+        NotificationsConfig { enabled: true, poll_interval_minutes: 30, ntfy }
+    }
+
+    #[cfg(feature = "ntfy")]
+    fn ntfy_cfg(enabled: bool) -> crate::config::NtfyConfig {
+        crate::config::NtfyConfig {
+            enabled,
+            server: "https://ntfy.example".into(),
+            topic: "t".into(),
+            priority: None,
+            auth_token: None,
+        }
+    }
+
+    #[test]
+    fn can_push_false_without_ntfy_block() {
+        assert!(!can_push(&notif(None)));
+    }
+
+    #[cfg(not(feature = "ntfy"))]
+    #[test]
+    fn can_push_false_when_feature_off() {
+        // Struct literal impossible without the feature's field use; parse instead.
+        let n: NotificationsConfig = toml::from_str(
+            "enabled = true\npoll_interval_minutes = 30\n[ntfy]\ntopic = \"t\"\n",
+        ).unwrap();
+        assert!(n.ntfy.is_some());
+        assert!(!can_push(&n));
+    }
+
+    #[cfg(feature = "ntfy")]
+    #[test]
+    fn can_push_follows_enabled_block() {
+        assert!(can_push(&notif(Some(ntfy_cfg(true)))));
+        assert!(!can_push(&notif(Some(ntfy_cfg(false)))));
     }
 
     // Note: D-Bus and HTTP cannot be integration-tested in unit test context.

@@ -169,7 +169,13 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
             }
         };
 
-        let new_count = db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await?;
+        let new_count = match db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("  ✗ {}: {e}", manhwa.title);
+                continue;
+            }
+        };
 
         if new_count > 0 {
             eprintln!("  + {} — {} new chapter(s)", manhwa.title, new_count);
@@ -178,14 +184,18 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
         }
     }
 
-    let claimed = db::claim_unnotified(&pool).await?;
-    if !claimed.is_empty() && config.notifications.enabled {
-        let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();
-        notifier::send_grouped(&titles);
-        notifier::send_grouped_remote(&config.notifications, &titles).await;
-        eprintln!("\nmrm: notified for {} title(s)", titles.len());
+    if !notifier::can_push(&config.notifications) {
+        eprintln!("\nmrm: no ntfy sink in this build/config — leaving chapters for the notifying host");
     } else {
-        eprintln!("\nmrm: nothing new to notify");
+        let claimed = db::claim_unnotified(&pool).await?;
+        if !claimed.is_empty() && config.notifications.enabled {
+            let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();
+            notifier::send_grouped(&titles);
+            notifier::send_grouped_remote(&config.notifications, &titles).await;
+            eprintln!("\nmrm: notified for {} title(s)", titles.len());
+        } else {
+            eprintln!("\nmrm: nothing new to notify");
+        }
     }
 
     // Discovery pass (once-mode always runs it to make manual triggering easy;
