@@ -1925,6 +1925,12 @@ fn viewer_log_dir(xdg_state: Option<&str>, home: Option<&str>) -> Option<std::pa
 
 /// Create the viewer log (0700 dir, 0600 file) and return it, or None.
 fn open_viewer_log(name: &str) -> Option<std::fs::File> {
+    open_state_log(name, false)
+}
+
+/// Open `name` in the state log directory (0700 dir, 0600 file), truncating
+/// or appending.
+fn open_state_log(name: &str, append: bool) -> Option<std::fs::File> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let dir = viewer_log_dir(
         std::env::var("XDG_STATE_HOME").ok().as_deref(),
@@ -1932,8 +1938,18 @@ fn open_viewer_log(name: &str) -> Option<std::fs::File> {
     )?;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
     std::fs::OpenOptions::new()
-        .write(true).create(true).truncate(true).mode(0o600)
+        .write(true).create(true).truncate(!append).append(append).mode(0o600)
         .open(dir.join(name)).ok()
+}
+
+/// Append `text` to `panic.log` in the state directory. Best effort: used by
+/// the panic hook for panics off the UI thread, which must not touch the
+/// terminal.
+pub(crate) fn append_panic_log(text: &str) {
+    use std::io::Write;
+    if let Some(mut f) = open_state_log("panic.log", true) {
+        let _ = writeln!(f, "{text}");
+    }
 }
 
 /// Read rv's stdout: send the first line (the socket path) down `tx`, then

@@ -269,13 +269,30 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Install a panic hook that restores the terminal first (so the message is
-/// readable on the main screen) and then runs the previously installed hook.
+/// Install a panic hook for the process. The hook is process-wide and runs on
+/// whichever thread panicked, before tokio catches the unwind, so only a panic
+/// on the installing (UI) thread may touch the terminal: it restores it and
+/// chains to the previous hook so the message is readable on the main screen.
+/// A panic on any other thread (a spawned task, `spawn_blocking`) is caught by
+/// tokio and the UI keeps running, so it is appended to `panic.log` instead.
 fn install_panic_hook() {
+    install_panic_hook_with(restore_terminal, app::append_panic_log);
+}
+
+fn install_panic_hook_with(restore: fn(), log: fn(&str)) {
+    let ui_thread = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        previous(info);
+        if std::thread::current().id() == ui_thread {
+            restore();
+            previous(info);
+        } else {
+            let thread = std::thread::current();
+            log(&format!(
+                "thread '{}' {info}",
+                thread.name().unwrap_or("<unnamed>"),
+            ));
+        }
     }));
 }
 
@@ -411,15 +428,62 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    // The panic hook is process-global; tests that swap it must not overlap.
+    static HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RESTORES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn count_restore() { RESTORES.fetch_add(1, Ordering::SeqCst); }
+    fn record_log(s: &str) { LOGGED.lock().unwrap_or_else(|e| e.into_inner()).push(s.to_string()); }
+    /// Entries mentioning `needle` (other tests' panics may be logged too).
+    fn logged_with(needle: &str) -> Vec<String> {
+        LOGGED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| l.contains(needle)).cloned().collect()
+    }
+
     #[test]
-    fn panic_hook_chains_to_previous_hook() {
+    fn panic_hook_restores_and_chains_on_the_ui_thread_only() {
+        let _g = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RESTORES.store(0, Ordering::SeqCst);
+        LOGGED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let called = Arc::new(AtomicBool::new(false));
         let c = called.clone();
         std::panic::set_hook(Box::new(move |_| c.store(true, Ordering::SeqCst)));
-        install_panic_hook();
-        let _ = std::panic::catch_unwind(|| panic!("boom"));
-        let _ = std::panic::take_hook(); // back to default
+        install_panic_hook_with(count_restore, record_log);
+
+        // UI thread: restore + chain, nothing logged.
+        let _ = std::panic::catch_unwind(|| panic!("ui boom"));
+        assert_eq!(RESTORES.load(Ordering::SeqCst), 1);
         assert!(called.load(Ordering::SeqCst), "previous hook was not called");
+        assert!(logged_with("ui boom").is_empty());
+
+        // Another thread: logged, no restore, no chaining.
+        called.store(false, Ordering::SeqCst);
+        std::thread::Builder::new().name("worker-x".into())
+            .spawn(|| panic!("task boom")).unwrap().join().unwrap_err();
+        assert_eq!(RESTORES.load(Ordering::SeqCst), 1, "off-thread panic restored the terminal");
+        assert!(!called.load(Ordering::SeqCst), "off-thread panic reached the stderr hook");
+        let logged = logged_with("task boom");
+        assert_eq!(logged.len(), 1);
+        assert!(logged[0].contains("task boom") && logged[0].contains("worker-x"), "{logged:?}");
+        assert!(logged[0].contains("main.rs"), "location missing: {logged:?}");
+        let _ = std::panic::take_hook();
+    }
+
+    #[test]
+    fn panic_in_a_tokio_task_does_not_restore_the_terminal() {
+        let _g = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RESTORES.store(0, Ordering::SeqCst);
+        LOGGED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_hook_with(count_restore, record_log);
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let r = rt.block_on(async { tokio::spawn(async { panic!("page task") }).await });
+        assert!(r.unwrap_err().is_panic());
+        let r = rt.block_on(async { tokio::task::spawn_blocking(|| panic!("image work")).await });
+        assert!(r.unwrap_err().is_panic());
+        let _ = std::panic::take_hook();
+        assert_eq!(RESTORES.load(Ordering::SeqCst), 0, "task panic restored the terminal");
+        assert_eq!(logged_with("page task").len() + logged_with("image work").len(), 2);
     }
 
     #[test]
