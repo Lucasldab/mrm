@@ -630,7 +630,10 @@ impl App {
         } else if k == self.keys.bottom() {
             self.library_sel = count.saturating_sub(1);
         } else if k == self.keys.search() {
-            self.search_active = true; self.search_query.clear();
+            let prev = self.selected_manhwa_id();
+            self.search_active = true;
+            self.search_query.clear();
+            self.restore_library_selection(prev);
         } else if k == self.keys.add() {
             self.add_search_query.clear();
             self.add_search_results.clear();
@@ -2332,6 +2335,24 @@ mod task_tests {
         let r = app.handle_event(AppEvent::RefreshDone { manhwa_id: id, result: Ok(s) }).await;
         assert!(r.is_err(), "a database failure must propagate");
         assert_ne!(app.status_msg.as_deref(), Some("Refresh skipped: series no longer in library"));
+    }
+
+    #[tokio::test]
+    async fn opening_the_library_filter_keeps_the_selected_series() {
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        for (i, t) in ["a", "b", "c"].iter().enumerate() {
+            let mut s = crate::db::tests::series(1, &format!("https://x/flt{i}"));
+            s.title = t.to_string();
+            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        }
+        app.reload_manhwa().await.unwrap();
+        app.sort_mode = SortMode::Title;
+        app.search_query = "c".into(); // an active filter showing only "c"
+        app.library_sel = 0;
+        let id = app.selected_manhwa_id().unwrap();
+        app.handle_event(press(KeyCode::Char('/'))).await.unwrap();
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.selected_manhwa_id(), Some(id), "cursor must stay on the same series");
     }
 
     #[tokio::test]
