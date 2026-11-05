@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 
@@ -201,10 +201,7 @@ async fn preload_covers_inner(
             let resized = img.resize(300, 450, image::imageops::FilterType::Triangle);
             // Atomic write so partial downloads can never leave a corrupt file
             // behind for the in-memory cache to load on next paint.
-            let tmp = path.with_extension("jpg.tmp");
-            if resized.save(&tmp).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+            let _ = write_atomic_jpeg(&resized, &path);
         });
     }
 
@@ -215,10 +212,34 @@ async fn preload_covers_inner(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Write `img` to `path` via a temp file + rename. The temp name ends in
+/// `.tmp`, so the format must be given explicitly rather than inferred.
+fn write_atomic_jpeg(img: &DynamicImage, path: &Path) -> std::io::Result<()> {
+    let tmp = path.with_extension("jpg.tmp");
+    img.save_with_format(&tmp, image::ImageFormat::Jpeg).map_err(std::io::Error::other)?;
+    std::fs::rename(&tmp, path)
+}
+
 fn cache_dir_path() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".cache/mrm/covers")
     } else {
         PathBuf::from("/tmp/mrm_covers")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_jpeg_creates_decodable_jpg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("1.jpg");
+        let img = DynamicImage::new_rgb8(2, 2);
+        write_atomic_jpeg(&img, &path).unwrap();
+        assert!(path.exists());
+        assert!(!dir.path().join("1.jpg.tmp").exists());
+        assert_eq!(image::open(&path).unwrap().width(), 2);
     }
 }
