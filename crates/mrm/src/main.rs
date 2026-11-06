@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod cover_cache;
 mod db;
+mod import;
 mod notifier;
 #[cfg(feature = "ntfy")]
 mod ntfy;
@@ -67,6 +68,7 @@ enum Mode {
     Tui,
     Daemon,
     Once,
+    Import { path: String, dry_run: bool },
 }
 
 fn parse_args() -> Mode {
@@ -75,12 +77,23 @@ fn parse_args() -> Mode {
         match arg.as_str() {
             "--daemon" | "-d" => return Mode::Daemon,
             "--once"          => return Mode::Once,
+            "--import"        => {
+                let rest = &args[2..];
+                let Some(path) = rest.iter().find(|a| !a.starts_with("--")) else {
+                    eprintln!("mrm: --import needs a file");
+                    std::process::exit(2);
+                };
+                let dry_run = rest.iter().any(|a| a == "--dry-run");
+                return Mode::Import { path: path.clone(), dry_run };
+            }
             "--help" | "-h"   => {
                 eprintln!("Usage: mrm [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --daemon, -d  Run as background poller (no TUI)");
                 eprintln!("  --once        Poll once and exit");
+                eprintln!("  --import FILE [--dry-run]");
+                eprintln!("                Add series by title, one per line: `title<TAB>read through chapter`");
                 eprintln!("  --help, -h    Show this help");
                 std::process::exit(0);
             }
@@ -110,6 +123,10 @@ async fn main() -> Result<()> {
     match mode {
         Mode::Daemon => run_daemon(pool, config).await,
         Mode::Once   => run_once(pool, config).await,
+        Mode::Import { path, dry_run } => {
+            let registry = scraper::build_registry(&config);
+            import::run(&pool, &registry, &path, dry_run).await
+        }
         Mode::Tui    => run_tui(pool, config).await,
     }
 }

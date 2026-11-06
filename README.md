@@ -119,7 +119,15 @@ mrm --daemon
 
 # Poll once and exit
 mrm --once
+
+# Add series in bulk: one `title<TAB>last chapter read` per line
+mrm --import list.tsv --dry-run   # show matches, write nothing
+mrm --import list.tsv
 ```
+
+`--import` searches Asura, then MangaCK, then MangaDex, and adds only exact title
+matches (case and punctuation ignored); anything else is listed for you to add by
+hand. Chapters up to the given number are marked read, and nothing is pushed to ntfy.
 
 ## Default Keybinds
 

@@ -501,6 +501,28 @@ pub async fn mark_all_chapters_read(pool: &PgPool, manhwa_id: i64) -> Result<()>
     Ok(())
 }
 
+/// Mark every chapter numbered `<= through` read (bulk import of reading
+/// history). Returns how many chapters became read.
+pub async fn mark_read_through(pool: &PgPool, manhwa_id: i64, through: f64) -> Result<u64> {
+    let done = sqlx::query(
+        r#"
+        INSERT INTO progress (chapter_id, started_at, scrolled_pct, completed_at)
+        SELECT c.id, now(), 1.0, now()
+        FROM chapter c
+        WHERE c.manhwa_id = $1 AND c.number <= $2
+        ON CONFLICT(chapter_id) DO UPDATE SET
+            scrolled_pct = 1.0,
+            completed_at = COALESCE(progress.completed_at, now())
+        WHERE progress.completed_at IS NULL
+        "#,
+    )
+    .bind(manhwa_id)
+    .bind(through)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
 /// Update scroll progress. Returns true if this call newly completed the chapter.
 pub async fn update_scroll(
     pool: &PgPool,
@@ -1113,6 +1135,17 @@ pub(crate) mod tests {
         s.chapters = vec![ch(2.0, ASURA_OLD)];
         assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 1);
         assert_eq!(fetch_manhwa(&pool, id).await.unwrap().source_url, ASURA_OLD);
+    }
+
+    #[tokio::test]
+    async fn mark_read_through_marks_only_earlier_chapters() {
+        let pool = pool_or_skip!();
+        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/import"), "asura").await.unwrap();
+        assert_eq!(mark_read_through(&pool, id, 6.0).await.unwrap(), 6);
+        assert_eq!(mark_read_through(&pool, id, 6.0).await.unwrap(), 0, "idempotent");
+        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Reading);
+        assert_eq!(mark_read_through(&pool, id, 99.0).await.unwrap(), 4);
+        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
     }
 
     #[tokio::test]
