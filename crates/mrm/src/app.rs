@@ -382,7 +382,7 @@ impl App {
                     self.viewer_exited = false;
                     if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
                         // Viewer closed on its own: save progress, back to Detail.
-                        self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
+                        self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::ViewerClosed).await;
                         self.kill_viewer();
                         self.open_detail(manhwa_id).await?;
                     } else {
@@ -517,7 +517,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
-                self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
+                self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Quit).await;
                 self.kill_viewer();
             }
             self.should_quit = true;
@@ -848,15 +848,15 @@ impl App {
     async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         let k = key.code;
         if k == KeyCode::Esc || k == self.keys.back() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Back).await;
             self.kill_viewer();
             self.open_detail(manhwa_id).await?;
         } else if k == self.keys.next_chapter() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::NextChapter).await;
             self.kill_viewer();
             self.open_next_chapter(manhwa_id, chapter_id).await?;
         } else if k == self.keys.prev_chapter() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::PrevChapter).await;
             self.kill_viewer();
             self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
@@ -1518,16 +1518,17 @@ impl App {
 
     /// Save progress; a failure becomes a status message so leaving the
     /// Reader (and the viewer teardown after it) never depends on the DB.
-    async fn save_reader_progress_nonfatal(&mut self, chapter_id: i64, manhwa_id: i64) {
-        if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id).await {
+    async fn save_reader_progress_nonfatal(&mut self, chapter_id: i64, manhwa_id: i64, exit: ReaderExit) {
+        if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id, exit).await {
             self.set_msg(format!("progress not saved: {e:#}"));
         }
     }
 
-    /// Mark the chapter read only if the viewer was used and every page loaded.
-    async fn save_reader_progress(&mut self, chapter_id: i64, manhwa_id: i64) -> Result<()> {
+    /// Mark the chapter read only if the user finished it (`exit`) in a viewer
+    /// that opened, and every page loaded.
+    async fn save_reader_progress(&mut self, chapter_id: i64, manhwa_id: i64, exit: ReaderExit) -> Result<()> {
         if !should_mark_complete(
-            self.viewer_launched,
+            self.viewer_launched && exit.finished(),
             self.loading_finished,
             self.pages_ok,
             self.pages_ok + self.pages_failed,
@@ -2038,6 +2039,24 @@ mod msg_tests {
     }
 }
 
+/// How the Reader was left. Only closing the viewer or moving on to the next
+/// chapter says the chapter was read; Esc, the previous chapter and quitting
+/// leave it as it was (`r` in Detail marks it by hand).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderExit {
+    ViewerClosed,
+    NextChapter,
+    Back,
+    PrevChapter,
+    Quit,
+}
+
+impl ReaderExit {
+    pub fn finished(self) -> bool {
+        matches!(self, ReaderExit::ViewerClosed | ReaderExit::NextChapter)
+    }
+}
+
 /// A chapter counts as read only when the user closed the viewer and every
 /// page loaded: a mistaken open, a skipped chapter or a partly failed
 /// download must not complete it.
@@ -2075,7 +2094,16 @@ mod reselect_tests {
 
 #[cfg(test)]
 mod complete_tests {
-    use super::should_mark_complete;
+    use super::{should_mark_complete, ReaderExit};
+
+    #[test]
+    fn only_closing_the_viewer_or_moving_on_counts_as_finished() {
+        assert!(ReaderExit::ViewerClosed.finished());
+        assert!(ReaderExit::NextChapter.finished());
+        assert!(!ReaderExit::Back.finished(), "Esc must not mark the chapter read");
+        assert!(!ReaderExit::PrevChapter.finished());
+        assert!(!ReaderExit::Quit.finished());
+    }
 
     #[test]
     fn mistaken_open_then_esc_is_not_complete() {
@@ -2327,6 +2355,43 @@ mod task_tests {
 
     fn key(code: KeyCode) -> AppEvent {
         AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// A chapter open in the Reader with every page loaded.
+    async fn reader_with_loaded_chapter(app: &mut App, url: &str) -> (i64, i64) {
+        let mid = db::insert_manhwa_with_chapters(&app.pool, &crate::db::tests::series(3, url), "asura")
+            .await.unwrap();
+        let cid = db::fetch_chapters(&app.pool, mid).await.unwrap()[0].id;
+        db::start_chapter(&app.pool, cid).await.unwrap(); // what opening a chapter does
+        app.screen = Screen::Reader { manhwa_id: mid, chapter_id: cid };
+        app.viewer_launched = true;
+        app.loading_finished = true;
+        app.pages_ok = 5;
+        app.pages_failed = 0;
+        (mid, cid)
+    }
+
+    async fn completed(app: &App, mid: i64, cid: i64) -> bool {
+        db::fetch_chapters(&app.pool, mid).await.unwrap()
+            .into_iter().find(|c| c.id == cid).unwrap().completed
+    }
+
+    #[tokio::test]
+    async fn esc_in_the_reader_does_not_mark_the_chapter_read() {
+        let Some((mut app, _rx)) = test_app(registry(&[])).await else { return };
+        let (mid, cid) = reader_with_loaded_chapter(&mut app, "https://x/esc-reader").await;
+        app.handle_event(key(KeyCode::Esc)).await.unwrap();
+        assert_eq!(app.screen, Screen::Detail { manhwa_id: mid });
+        assert!(!completed(&app, mid, cid).await, "Esc marked the chapter read");
+    }
+
+    #[tokio::test]
+    async fn closing_the_viewer_marks_the_chapter_read() {
+        let Some((mut app, _rx)) = test_app(registry(&[])).await else { return };
+        let (mid, cid) = reader_with_loaded_chapter(&mut app, "https://x/close-viewer").await;
+        app.viewer_exited = true;
+        app.handle_event(AppEvent::Tick).await.unwrap();
+        assert!(completed(&app, mid, cid).await);
     }
 
     #[tokio::test]
