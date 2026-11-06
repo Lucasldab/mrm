@@ -301,6 +301,16 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
 
     let series_slug = extract_series_slug(source_url);
     let mut chapters = parse_chapter_links(&document, now, series_slug.as_deref());
+    // Some series pages carry a disambiguating suffix their chapters lack
+    // (`/manga/the-beginning-after-the-end-2024/` lists
+    // `/chapter/the-beginning-after-the-end-chapter-1/`). Only when nothing
+    // matched, retry without a trailing `-<digits>`; matching stays exact
+    // otherwise, so `solo-leveling-2` never takes `solo-leveling` chapters.
+    if chapters.is_empty() {
+        if let Some(base) = series_slug.as_deref().and_then(strip_numeric_suffix) {
+            chapters = parse_chapter_links(&document, now, Some(base));
+        }
+    }
     chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(SeriesData {
@@ -598,6 +608,12 @@ pub(crate) fn extract_series_slug(source_url: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `name-2024` → `name`; None when the slug has no `-<digits>` suffix.
+fn strip_numeric_suffix(slug: &str) -> Option<&str> {
+    let (base, tail) = slug.rsplit_once('-')?;
+    (!base.is_empty() && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
 /// Does this `/chapter/...` href belong to the series with the given slug?
@@ -1000,5 +1016,28 @@ mod tests {
         </body></html>"#;
         let s = parse_series_page(html, "https://mangack.com/manga/solo-leveling/").unwrap();
         assert_eq!(s.cover_url.as_deref(), Some("https://mangack.com/wp-content/uploads/cover.jpg"));
+    }
+
+    #[test]
+    fn year_suffixed_series_slug_falls_back_to_the_base_slug() {
+        let html = r#"<html><body><h1>The Beginning After The End</h1>
+            <a href="https://mangack.com/chapter/the-beginning-after-the-end-chapter-2/">Chapter 2</a>
+            <a href="https://mangack.com/chapter/the-beginning-after-the-end-chapter-1/">Chapter 1</a>
+            <a href="https://mangack.com/chapter/the-beginning-after-the-end-side-story-x-chapter-9/">Chapter 9</a>
+        </body></html>"#;
+        let s = parse_series_page(html, "https://mangack.com/manga/the-beginning-after-the-end-2024/").unwrap();
+        let nums: Vec<f64> = s.chapters.iter().map(|c| c.number).collect();
+        assert_eq!(nums, [1.0, 2.0], "side story stays out");
+
+        // A real match on the full slug wins; no fallback to the base series.
+        let html = r#"<html><body><h1>Solo Leveling 2</h1>
+            <a href="https://mangack.com/chapter/solo-leveling-chapter-200/">Chapter 200</a>
+            <a href="https://mangack.com/chapter/solo-leveling-2-chapter-3/">Chapter 3</a>
+        </body></html>"#;
+        let s = parse_series_page(html, "https://mangack.com/manga/solo-leveling-2/").unwrap();
+        assert_eq!(s.chapters.iter().map(|c| c.number).collect::<Vec<_>>(), [3.0]);
+        assert_eq!(strip_numeric_suffix("name-2024"), Some("name"));
+        assert_eq!(strip_numeric_suffix("name"), None);
+        assert_eq!(strip_numeric_suffix("name-v2"), None);
     }
 }
