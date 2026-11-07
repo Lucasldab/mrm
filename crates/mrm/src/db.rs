@@ -1,5 +1,8 @@
 use anyhow::Result;
-use sqlx::{postgres::{PgPool, PgPoolOptions}, PgConnection, Row};
+use sqlx::{
+    postgres::{PgPool, PgPoolOptions},
+    PgConnection, Row,
+};
 
 use crate::types::{Chapter, Discovery, Manhwa, Status};
 
@@ -41,8 +44,14 @@ pub async fn fetch_aliases(pool: &PgPool, manhwa_id: i64) -> Result<Vec<(String,
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter()
-        .map(|r| (r.get::<String, _>("source"), r.get::<String, _>("source_url")))
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("source"),
+                r.get::<String, _>("source_url"),
+            )
+        })
         .collect())
 }
 
@@ -117,23 +126,23 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
     let mut manhwa_list = Vec::with_capacity(rows.len());
     for row in rows {
         let total: i64 = row.try_get("total_chapters")?;
-        let read:  i64 = row.try_get("read_chapters")?;
+        let read: i64 = row.try_get("read_chapters")?;
         let unread = (total - read).max(0) as u32;
 
         manhwa_list.push(Manhwa {
-            id:              row.try_get("id")?,
-            title:           row.try_get("title")?,
-            cover_url:       row.try_get("cover_url")?,
-            source:          row.try_get("source")?,
-            source_url:      row.try_get("source_url")?,
-            pub_status:      row.try_get("pub_status")?,
-            status:          Status::from_str(row.try_get("status")?),
+            id: row.try_get("id")?,
+            title: row.try_get("title")?,
+            cover_url: row.try_get("cover_url")?,
+            source: row.try_get("source")?,
+            source_url: row.try_get("source_url")?,
+            pub_status: row.try_get("pub_status")?,
+            status: Status::from_str(row.try_get("status")?),
             status_override: row.try_get::<bool, _>("status_override")?,
-            description:     row.try_get("description").unwrap_or(None),
+            description: row.try_get("description").unwrap_or(None),
             unread,
-            total:           total.max(0) as u32,
-            last_error:      row.try_get("last_error")?,
-            failing_since:   row.try_get("failing_since")?,
+            total: total.max(0) as u32,
+            last_error: row.try_get("last_error")?,
+            failing_since: row.try_get("failing_since")?,
             chapter_conflict: row.try_get("chapter_conflict")?,
         });
     }
@@ -163,23 +172,23 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
     .await?;
 
     let total: i64 = row.try_get("total_chapters")?;
-    let read:  i64 = row.try_get("read_chapters")?;
+    let read: i64 = row.try_get("read_chapters")?;
     let unread = (total - read).max(0) as u32;
 
     Ok(Manhwa {
-        id:              row.try_get("id")?,
-        title:           row.try_get("title")?,
-        cover_url:       row.try_get("cover_url")?,
-        source:          row.try_get("source")?,
-        source_url:      row.try_get("source_url")?,
-        pub_status:      row.try_get("pub_status")?,
-        status:          Status::from_str(row.try_get("status")?),
+        id: row.try_get("id")?,
+        title: row.try_get("title")?,
+        cover_url: row.try_get("cover_url")?,
+        source: row.try_get("source")?,
+        source_url: row.try_get("source_url")?,
+        pub_status: row.try_get("pub_status")?,
+        status: Status::from_str(row.try_get("status")?),
         status_override: row.try_get::<bool, _>("status_override")?,
-        description:     row.try_get("description").unwrap_or(None),
+        description: row.try_get("description").unwrap_or(None),
         unread,
-        total:           total.max(0) as u32,
-        last_error:      row.try_get("last_error")?,
-        failing_since:   row.try_get("failing_since")?,
+        total: total.max(0) as u32,
+        last_error: row.try_get("last_error")?,
+        failing_since: row.try_get("failing_since")?,
         chapter_conflict: row.try_get("chapter_conflict")?,
     })
 }
@@ -215,14 +224,12 @@ pub async fn insert_manhwa_with_chapters(
     let mut tx = pool.begin().await?;
 
     // Check for duplicate source_url
-    let exists: bool = sqlx::query(
-        "SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = $1)",
-    )
-    .bind(&series.source_url)
-    .fetch_one(&mut *tx)
-    .await?
-    .try_get::<bool, _>(0)
-    .unwrap_or(false);
+    let exists: bool = sqlx::query("SELECT EXISTS(SELECT 1 FROM manhwa WHERE source_url = $1)")
+        .bind(&series.source_url)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get::<bool, _>(0)
+        .unwrap_or(false);
 
     if exists {
         return Err(anyhow::anyhow!("Already in library: {}", series.title));
@@ -246,7 +253,8 @@ pub async fn insert_manhwa_with_chapters(
     .await?;
 
     let manhwa_id: i64 = row.try_get("id")?;
-    let (chapters, note) = crate::scraper::resolve_collisions(series.chapters.clone(), &Default::default());
+    let (chapters, note) =
+        crate::scraper::resolve_collisions(series.chapters.clone(), &Default::default());
     set_conflict_conn(&mut tx, manhwa_id, note.as_deref()).await?;
 
     // Upsert all chapters within the same transaction
@@ -276,10 +284,12 @@ pub async fn insert_manhwa_with_chapters(
 
 /// Id of the library row with this exact source URL, if any.
 pub async fn manhwa_id_by_source_url(pool: &PgPool, source_url: &str) -> Result<Option<i64>> {
-    Ok(sqlx::query_scalar("SELECT id FROM manhwa WHERE source_url = $1")
-        .bind(source_url)
-        .fetch_optional(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT id FROM manhwa WHERE source_url = $1")
+            .bind(source_url)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// Delete a manhwa and all associated chapters and progress records.
@@ -294,12 +304,10 @@ pub async fn delete_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<()> {
 
 /// Clear the status override for a manhwa, re-enabling auto-computation.
 pub async fn clear_status_override(pool: &PgPool, manhwa_id: i64) -> Result<()> {
-    sqlx::query(
-        "UPDATE manhwa SET status_override = FALSE, updated_at = now() WHERE id = $1",
-    )
-    .bind(manhwa_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE manhwa SET status_override = FALSE, updated_at = now() WHERE id = $1")
+        .bind(manhwa_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -331,14 +339,14 @@ pub async fn fetch_chapters(pool: &PgPool, manhwa_id: i64) -> Result<Vec<Chapter
         .iter()
         .map(|row| -> Result<Chapter> {
             Ok(Chapter {
-                id:          row.try_get("id")?,
-                manhwa_id:   row.try_get("manhwa_id")?,
-                number:      row.try_get("number")?,
-                title:       row.try_get("title").unwrap_or(None),
-                url:         row.try_get("url")?,
+                id: row.try_get("id")?,
+                manhwa_id: row.try_get("manhwa_id")?,
+                number: row.try_get("number")?,
+                title: row.try_get("title").unwrap_or(None),
+                url: row.try_get("url")?,
                 released_at: row.try_get("released_at").unwrap_or(None),
-                scroll_pct:  row.try_get("scroll_pct").unwrap_or(0.0),
-                completed:   row.try_get::<bool, _>("completed").unwrap_or(false),
+                scroll_pct: row.try_get("scroll_pct").unwrap_or(0.0),
+                completed: row.try_get::<bool, _>("completed").unwrap_or(false),
             })
         })
         .collect();
@@ -348,10 +356,12 @@ pub async fn fetch_chapters(pool: &PgPool, manhwa_id: i64) -> Result<Vec<Chapter
 
 /// The series a chapter belongs to, or None for an unknown chapter id.
 pub async fn chapter_manhwa_id(pool: &PgPool, chapter_id: i64) -> Result<Option<i64>> {
-    Ok(sqlx::query_scalar("SELECT manhwa_id FROM chapter WHERE id = $1")
-        .bind(chapter_id)
-        .fetch_optional(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT manhwa_id FROM chapter WHERE id = $1")
+            .bind(chapter_id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// (series source, chapter URL) for a chapter id: what the image fetch needs.
@@ -362,7 +372,8 @@ pub async fn chapter_source(pool: &PgPool, chapter_id: i64) -> Result<Option<(St
     .bind(chapter_id)
     .fetch_optional(pool)
     .await?;
-    row.map(|r| Ok((r.try_get("source")?, r.try_get("url")?))).transpose()
+    row.map(|r| Ok((r.try_get("source")?, r.try_get("url")?)))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +381,10 @@ pub async fn chapter_source(pool: &PgPool, chapter_id: i64) -> Result<Option<(St
 // ---------------------------------------------------------------------------
 
 /// number bits -> stored URL, for resolve_collisions.
-async fn stored_urls_conn(conn: &mut PgConnection, manhwa_id: i64) -> Result<std::collections::HashMap<u64, String>> {
+async fn stored_urls_conn(
+    conn: &mut PgConnection,
+    manhwa_id: i64,
+) -> Result<std::collections::HashMap<u64, String>> {
     let rows = sqlx::query("SELECT number, url FROM chapter WHERE manhwa_id = $1")
         .bind(manhwa_id)
         .fetch_all(&mut *conn)
@@ -383,7 +397,11 @@ async fn stored_urls_conn(conn: &mut PgConnection, manhwa_id: i64) -> Result<std
     Ok(map)
 }
 
-async fn set_conflict_conn(conn: &mut PgConnection, manhwa_id: i64, note: Option<&str>) -> Result<()> {
+async fn set_conflict_conn(
+    conn: &mut PgConnection,
+    manhwa_id: i64,
+    note: Option<&str>,
+) -> Result<()> {
     sqlx::query("UPDATE manhwa SET chapter_conflict = $1 WHERE id = $2")
         .bind(note)
         .bind(manhwa_id)
@@ -420,7 +438,9 @@ async fn upsert_chapters_conn(
         .bind(&ch.released_at)
         .fetch_one(&mut *conn)
         .await?;
-        if new { inserted += 1; }
+        if new {
+            inserted += 1;
+        }
     }
     Ok(inserted)
 }
@@ -479,7 +499,11 @@ pub async fn apply_poll_result(
     series: &crate::scraper::SeriesData,
     old_pub_status: &str,
 ) -> Result<usize> {
-    Ok(apply_poll_result_noted(pool, manhwa_id, series, old_pub_status).await?.0)
+    Ok(
+        apply_poll_result_noted(pool, manhwa_id, series, old_pub_status)
+            .await?
+            .0,
+    )
 }
 
 /// Longest stored poll error, in characters.
@@ -528,7 +552,13 @@ pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<Claimed>> {
     .fetch_all(pool)
     .await?;
     rows.iter()
-        .map(|r| Ok(Claimed { manhwa_id: r.try_get("id")?, title: r.try_get("title")?, chapters: r.try_get("n")? }))
+        .map(|r| {
+            Ok(Claimed {
+                manhwa_id: r.try_get("id")?,
+                title: r.try_get("title")?,
+                chapters: r.try_get("n")?,
+            })
+        })
         .collect()
 }
 
@@ -536,8 +566,8 @@ pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<Claimed>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claimed {
     pub manhwa_id: i64,
-    pub title:     String,
-    pub chapters:  i64,
+    pub title: String,
+    pub chapters: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,22 +634,17 @@ pub async fn mark_read_through(pool: &PgPool, manhwa_id: i64, through: f64) -> R
 }
 
 /// Update scroll progress. Returns true if this call newly completed the chapter.
-pub async fn update_scroll(
-    pool: &PgPool,
-    chapter_id: i64,
-    pct: f64,
-) -> Result<bool> {
+pub async fn update_scroll(pool: &PgPool, chapter_id: i64, pct: f64) -> Result<bool> {
     let pct = pct.clamp(0.0, 1.0);
 
     // Check if it was already completed before this update
-    let was_completed: bool = sqlx::query(
-        "SELECT completed_at IS NOT NULL FROM progress WHERE chapter_id = $1",
-    )
-    .bind(chapter_id)
-    .fetch_optional(pool)
-    .await?
-    .map(|r| r.try_get::<bool, _>(0).unwrap_or(false))
-    .unwrap_or(false);
+    let was_completed: bool =
+        sqlx::query("SELECT completed_at IS NOT NULL FROM progress WHERE chapter_id = $1")
+            .bind(chapter_id)
+            .fetch_optional(pool)
+            .await?
+            .map(|r| r.try_get::<bool, _>(0).unwrap_or(false))
+            .unwrap_or(false);
 
     sqlx::query(
         r#"
@@ -683,13 +708,11 @@ pub(crate) async fn update_pub_status_conn(
     manhwa_id: i64,
     pub_status: &str,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE manhwa SET pub_status = $1, updated_at = now() WHERE id = $2",
-    )
-    .bind(pub_status)
-    .bind(manhwa_id)
-    .execute(&mut *conn)
-    .await?;
+    sqlx::query("UPDATE manhwa SET pub_status = $1, updated_at = now() WHERE id = $2")
+        .bind(pub_status)
+        .bind(manhwa_id)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
@@ -718,7 +741,10 @@ pub async fn recompute_status(pool: &PgPool, manhwa_id: i64) -> Result<Status> {
     recompute_status_conn(&mut conn, manhwa_id).await
 }
 
-pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i64) -> Result<Status> {
+pub(crate) async fn recompute_status_conn(
+    conn: &mut PgConnection,
+    manhwa_id: i64,
+) -> Result<Status> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -748,11 +774,11 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
         return Ok(Status::from_str(current.try_get("status")?));
     }
 
-    let read:   i64  = row.try_get("read")?;
-    let unread: i64  = row.try_get("unread")?;
+    let read: i64 = row.try_get("read")?;
+    let unread: i64 = row.try_get("unread")?;
     let pub_st: &str = row.try_get("pub_status")?;
 
-    let total:  i64  = row.try_get("total")?;
+    let total: i64 = row.try_get("total")?;
     let status = if looked_into(read, total) {
         Status::LookedInto
     } else if unread > 0 {
@@ -765,13 +791,11 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
         Status::UpToDate
     };
 
-    sqlx::query(
-        "UPDATE manhwa SET status = $1, updated_at = now() WHERE id = $2",
-    )
-    .bind(status.as_str())
-    .bind(manhwa_id)
-    .execute(&mut *conn)
-    .await?;
+    sqlx::query("UPDATE manhwa SET status = $1, updated_at = now() WHERE id = $2")
+        .bind(status.as_str())
+        .bind(manhwa_id)
+        .execute(&mut *conn)
+        .await?;
 
     Ok(status)
 }
@@ -782,8 +806,7 @@ pub(crate) async fn recompute_status_conn(conn: &mut PgConnection, manhwa_id: i6
 
 /// SQL twin of `scraper::asura::slug_key` over a `source_url` column: last
 /// path segment, trailing `/` ignored, `-hash8` suffix stripped.
-const ASURA_SLUG_SQL: &str =
-    r"regexp_replace(regexp_replace(rtrim(regexp_replace(source_url, '[?#].*$', ''), '/'), '^.*/', ''), '-[0-9a-f]{8}$', '')";
+const ASURA_SLUG_SQL: &str = r"regexp_replace(regexp_replace(rtrim(regexp_replace(source_url, '[?#].*$', ''), '/'), '^.*/', ''), '-[0-9a-f]{8}$', '')";
 
 /// Insert a discovered entry if not already known in either library or
 /// discoveries. Returns true if a new row was inserted.
@@ -891,14 +914,14 @@ pub async fn fetch_discoveries(pool: &PgPool) -> Result<Vec<Discovery>> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         out.push(Discovery {
-            id:             row.try_get("id")?,
-            source:         row.try_get("source")?,
-            source_url:     row.try_get("source_url")?,
-            title:          row.try_get("title")?,
-            cover_url:      row.try_get("cover_url")?,
+            id: row.try_get("id")?,
+            source: row.try_get("source")?,
+            source_url: row.try_get("source_url")?,
+            title: row.try_get("title")?,
+            cover_url: row.try_get("cover_url")?,
             chapter_number: row.try_get("chapter_number")?,
-            released_at:    row.try_get("released_at")?,
-            first_seen_at:  row.try_get("first_seen_at")?,
+            released_at: row.try_get("released_at")?,
+            first_seen_at: row.try_get("first_seen_at")?,
         });
     }
     Ok(out)
@@ -960,8 +983,15 @@ pub(crate) mod tests {
     pub(crate) async fn test_pool() -> Option<PgPool> {
         let base = std::env::var("MRM_TEST_DATABASE_URL").ok()?;
         let admin = PgPool::connect(&base).await.expect("connect test cluster");
-        let name = format!("mrm_t_{}_{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst));
-        sqlx::query(&format!("CREATE DATABASE {name}")).execute(&admin).await.unwrap();
+        let name = format!(
+            "mrm_t_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&admin)
+            .await
+            .unwrap();
         let url = base.replacen("/mrm_test", &format!("/{name}"), 1);
         Some(open_db(&url).await.expect("open_db"))
     }
@@ -978,11 +1008,24 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn ch(num: f64, url: &str) -> ChapterData {
-        ChapterData { number: num, title: None, url: format!("{url}/ch/{num}"), released_at: Some("2026-11-05".into()) }
+        ChapterData {
+            number: num,
+            title: None,
+            url: format!("{url}/ch/{num}"),
+            released_at: Some("2026-11-05".into()),
+        }
     }
 
     macro_rules! pool_or_skip {
-        () => { match test_pool().await { Some(p) => p, None => { eprintln!("skipped: MRM_TEST_DATABASE_URL unset"); return; } } };
+        () => {
+            match test_pool().await {
+                Some(p) => p,
+                None => {
+                    eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
+                    return;
+                }
+            }
+        };
     }
 
     #[tokio::test]
@@ -997,22 +1040,33 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn insert_and_fetch_manhwa() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(3, "https://x/a"), "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(3, "https://x/a"), "mangadex")
+            .await
+            .unwrap();
         let all = fetch_all_manhwa(&pool).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, id);
         assert_eq!(all[0].unread, 3);
         assert!(!all[0].status_override);
         let chs = fetch_chapters(&pool, id).await.unwrap();
-        assert_eq!(chs.iter().map(|c| c.number).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            chs.iter().map(|c| c.number).collect::<Vec<_>>(),
+            vec![1.0, 2.0, 3.0]
+        );
         assert!(chs.iter().all(|c| !c.completed));
-        assert!(insert_manhwa_with_chapters(&pool, &series(3, "https://x/a"), "mangadex").await.is_err());
+        assert!(
+            insert_manhwa_with_chapters(&pool, &series(3, "https://x/a"), "mangadex")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn progress_and_status() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(6, "https://x/b"), "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(6, "https://x/b"), "mangadex")
+            .await
+            .unwrap();
         let chs = fetch_chapters(&pool, id).await.unwrap();
         for c in &chs[..5] {
             start_chapter(&pool, c.id).await.unwrap();
@@ -1022,17 +1076,28 @@ pub(crate) mod tests {
         start_chapter(&pool, chs[5].id).await.unwrap();
         update_scroll(&pool, chs[5].id, 0.8).await.unwrap();
         update_scroll(&pool, chs[5].id, 0.5).await.unwrap();
-        let pct: f64 = sqlx::query_scalar("SELECT scrolled_pct FROM progress WHERE chapter_id = $1")
-            .bind(chs[5].id).fetch_one(&pool).await.unwrap();
+        let pct: f64 =
+            sqlx::query_scalar("SELECT scrolled_pct FROM progress WHERE chapter_id = $1")
+                .bind(chs[5].id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(pct, 0.8);
         assert!(update_scroll(&pool, chs[5].id, 1.0).await.unwrap());
         assert!(!update_scroll(&pool, chs[5].id, 1.0).await.unwrap());
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
         let mut done = series(6, "https://x/b");
         done.pub_status = "completed".into();
-        apply_poll_result(&pool, id, &done, "ongoing").await.unwrap();
-        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Completed);
-        set_manhwa_status(&pool, id, &Status::Dropped, true).await.unwrap();
+        apply_poll_result(&pool, id, &done, "ongoing")
+            .await
+            .unwrap();
+        assert_eq!(
+            recompute_status(&pool, id).await.unwrap(),
+            Status::Completed
+        );
+        set_manhwa_status(&pool, id, &Status::Dropped, true)
+            .await
+            .unwrap();
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Dropped);
     }
 
@@ -1049,8 +1114,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn short_series_fully_read_is_up_to_date() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(3, "https://x/short"), "mangadex").await.unwrap();
-        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::LookedInto);
+        let id = insert_manhwa_with_chapters(&pool, &series(3, "https://x/short"), "mangadex")
+            .await
+            .unwrap();
+        assert_eq!(
+            recompute_status(&pool, id).await.unwrap(),
+            Status::LookedInto
+        );
         mark_all_chapters_read(&pool, id).await.unwrap();
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
     }
@@ -1058,13 +1128,18 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn long_series_with_three_read_is_looked_into() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/long"), "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/long"), "mangadex")
+            .await
+            .unwrap();
         let chs = fetch_chapters(&pool, id).await.unwrap();
         for c in &chs[..3] {
             start_chapter(&pool, c.id).await.unwrap();
             update_scroll(&pool, c.id, 1.0).await.unwrap();
         }
-        assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::LookedInto);
+        assert_eq!(
+            recompute_status(&pool, id).await.unwrap(),
+            Status::LookedInto
+        );
     }
 
     #[tokio::test]
@@ -1072,13 +1147,19 @@ pub(crate) mod tests {
         let pool = pool_or_skip!();
         let mut s = series(3, "https://x/pick");
         s.pub_status = "completed".into();
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
-        apply_picker_status(&pool, id, &Status::UpToDate).await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+        apply_picker_status(&pool, id, &Status::UpToDate)
+            .await
+            .unwrap();
         let m = fetch_manhwa(&pool, id).await.unwrap();
         assert_eq!(m.status, Status::UpToDate);
         assert_eq!(m.unread, 0);
         assert!(!m.status_override);
-        apply_picker_status(&pool, id, &Status::Dropped).await.unwrap();
+        apply_picker_status(&pool, id, &Status::Dropped)
+            .await
+            .unwrap();
         let m = fetch_manhwa(&pool, id).await.unwrap();
         assert_eq!(m.status, Status::Dropped);
         assert!(m.status_override);
@@ -1087,54 +1168,109 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn mark_all_read_and_delete_cascades() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(4, "https://x/c"), "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(4, "https://x/c"), "mangadex")
+            .await
+            .unwrap();
         mark_all_chapters_read(&pool, id).await.unwrap();
         assert_eq!(fetch_manhwa(&pool, id).await.unwrap().unread, 0);
         delete_manhwa(&pool, id).await.unwrap();
-        let left: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM chapter) + (SELECT COUNT(*) FROM progress)")
-            .fetch_one(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM chapter) + (SELECT COUNT(*) FROM progress)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(left, 0);
     }
 
     #[tokio::test]
     async fn discovery_novelty_and_dismiss() {
         let pool = pool_or_skip!();
-        assert!(upsert_discovery(&pool, "asura", "https://x/d", "D", None, Some(3.0), None).await.unwrap());
-        assert!(!upsert_discovery(&pool, "asura", "https://x/d", "D", Some("c.jpg"), None, None).await.unwrap());
+        assert!(
+            upsert_discovery(&pool, "asura", "https://x/d", "D", None, Some(3.0), None)
+                .await
+                .unwrap()
+        );
+        assert!(!upsert_discovery(
+            &pool,
+            "asura",
+            "https://x/d",
+            "D",
+            Some("c.jpg"),
+            None,
+            None
+        )
+        .await
+        .unwrap());
         let d = fetch_discoveries(&pool).await.unwrap();
-        assert_eq!((d.len(), d[0].cover_url.as_deref(), d[0].chapter_number), (1, Some("c.jpg"), Some(3.0)));
-        insert_manhwa_with_chapters(&pool, &series(1, "https://x/e"), "asura").await.unwrap();
-        assert!(!upsert_discovery(&pool, "asura", "https://x/e", "E", None, None, None).await.unwrap());
+        assert_eq!(
+            (d.len(), d[0].cover_url.as_deref(), d[0].chapter_number),
+            (1, Some("c.jpg"), Some(3.0))
+        );
+        insert_manhwa_with_chapters(&pool, &series(1, "https://x/e"), "asura")
+            .await
+            .unwrap();
+        assert!(
+            !upsert_discovery(&pool, "asura", "https://x/e", "E", None, None, None)
+                .await
+                .unwrap()
+        );
         dismiss_discovery(&pool, d[0].id).await.unwrap();
         assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
         set_discovery_meta(&pool, "k", "v1").await.unwrap();
         set_discovery_meta(&pool, "k", "v2").await.unwrap();
-        assert_eq!(get_discovery_meta(&pool, "k").await.unwrap().as_deref(), Some("v2"));
+        assert_eq!(
+            get_discovery_meta(&pool, "k").await.unwrap().as_deref(),
+            Some("v2")
+        );
     }
 
     #[tokio::test]
     async fn poll_counts_only_inserts() {
         let pool = pool_or_skip!();
         let mut s = series(3, "https://x/p");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
         s.chapters.push(ch(4.0, "https://x/p"));
-        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 1);
-        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 0);
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            1
+        );
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            0
+        );
         s.pub_status = "completed".into();
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
-        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().pub_status, "completed");
+        assert_eq!(
+            fetch_manhwa(&pool, id).await.unwrap().pub_status,
+            "completed"
+        );
     }
 
     #[tokio::test]
     async fn claim_notifies_new_chapters_once() {
         let pool = pool_or_skip!();
         let mut s = series(3, "https://x/q");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
-        assert!(claim_unnotified(&pool).await.unwrap().is_empty(), "back catalogue is never announced");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+        assert!(
+            claim_unnotified(&pool).await.unwrap().is_empty(),
+            "back catalogue is never announced"
+        );
         s.chapters.push(ch(4.0, "https://x/q"));
         s.chapters.push(ch(4.5, "https://x/q"));
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
-        assert_eq!(claim_unnotified(&pool).await.unwrap(), vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 2 }]);
+        assert_eq!(
+            claim_unnotified(&pool).await.unwrap(),
+            vec![Claimed {
+                manhwa_id: id,
+                title: s.title.clone(),
+                chapters: 2
+            }]
+        );
         assert!(claim_unnotified(&pool).await.unwrap().is_empty());
     }
 
@@ -1142,11 +1278,20 @@ pub(crate) mod tests {
     async fn concurrent_claims_never_double_notify() {
         let pool = pool_or_skip!();
         let mut s = series(1, "https://x/r");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
-        for n in 2..=21 { s.chapters.push(ch(n as f64, "https://x/r")); }
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+        for n in 2..=21 {
+            s.chapters.push(ch(n as f64, "https://x/r"));
+        }
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
         let (a, b) = tokio::join!(claim_unnotified(&pool), claim_unnotified(&pool));
-        let total: i64 = a.unwrap().iter().chain(b.unwrap().iter()).map(|c| c.chapters).sum();
+        let total: i64 = a
+            .unwrap()
+            .iter()
+            .chain(b.unwrap().iter())
+            .map(|c| c.chapters)
+            .sum();
         assert_eq!(total, 20);
     }
 
@@ -1154,36 +1299,69 @@ pub(crate) mod tests {
     async fn claim_skips_rows_locked_by_a_poll() {
         let pool = pool_or_skip!();
         let mut s = series(1, "https://x/lk");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
         s.chapters.push(ch(2.0, "https://x/lk"));
         s.chapters.push(ch(3.0, "https://x/lk"));
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
         // A concurrent poll transaction holds a lock on one unnotified chapter.
         let mut tx = pool.begin().await.unwrap();
         let locked: i64 = sqlx::query_scalar(
-            "SELECT id FROM chapter WHERE manhwa_id = $1 AND number = 2 FOR UPDATE")
-            .bind(id).fetch_one(&mut *tx).await.unwrap();
+            "SELECT id FROM chapter WHERE manhwa_id = $1 AND number = 2 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
         let got = tokio::time::timeout(std::time::Duration::from_secs(5), claim_unnotified(&pool))
-            .await.expect("claim must not block on locked rows").unwrap();
-        assert_eq!(got, vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 1 }]);
+            .await
+            .expect("claim must not block on locked rows")
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![Claimed {
+                manhwa_id: id,
+                title: s.title.clone(),
+                chapters: 1
+            }]
+        );
         tx.rollback().await.unwrap();
         let again = claim_unnotified(&pool).await.unwrap();
-        assert_eq!(again, vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 1 }], "skipped row {locked} is claimed next time");
+        assert_eq!(
+            again,
+            vec![Claimed {
+                manhwa_id: id,
+                title: s.title.clone(),
+                chapters: 1
+            }],
+            "skipped row {locked} is claimed next time"
+        );
     }
 
     #[tokio::test]
     async fn read_chapters_are_claimed_silently() {
         let pool = pool_or_skip!();
         let mut s = series(1, "https://x/s");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
         s.chapters.push(ch(2.0, "https://x/s"));
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
-        let c2 = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 2.0).unwrap();
+        let c2 = fetch_chapters(&pool, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.number == 2.0)
+            .unwrap();
         start_chapter(&pool, c2.id).await.unwrap();
         update_scroll(&pool, c2.id, 1.0).await.unwrap();
         assert!(claim_unnotified(&pool).await.unwrap().is_empty());
-        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapter WHERE notified_at IS NULL")
-            .fetch_one(&pool).await.unwrap();
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chapter WHERE notified_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(pending, 0);
     }
 
@@ -1193,10 +1371,15 @@ pub(crate) mod tests {
     async fn metadata_refresh_with_empty_title_keeps_the_old_one() {
         let pool = pool_or_skip!();
         let mut s = series(1, "https://x/t");
-        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura")
+            .await
+            .unwrap();
         s.title = String::new();
         update_manhwa_metadata(&pool, id, &s).await.unwrap();
-        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().title, "Series https://x/t");
+        assert_eq!(
+            fetch_manhwa(&pool, id).await.unwrap().title,
+            "Series https://x/t"
+        );
         s.title = "Renamed".into();
         update_manhwa_metadata(&pool, id, &s).await.unwrap();
         assert_eq!(fetch_manhwa(&pool, id).await.unwrap().title, "Renamed");
@@ -1211,7 +1394,9 @@ pub(crate) mod tests {
     async fn poll_stores_the_post_redirect_source_url() {
         let pool = pool_or_skip!();
         let mut s = series(1, ASURA_OLD);
-        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura")
+            .await
+            .unwrap();
         s.source_url = ASURA_NEW.into();
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
         assert_eq!(fetch_manhwa(&pool, id).await.unwrap().source_url, ASURA_NEW);
@@ -1221,20 +1406,33 @@ pub(crate) mod tests {
     async fn poll_redirect_onto_an_existing_row_keeps_both_and_succeeds() {
         let pool = pool_or_skip!();
         let mut s = series(1, ASURA_OLD);
-        let id = insert_manhwa_with_chapters(&pool, &s, "asura").await.unwrap();
-        insert_manhwa_with_chapters(&pool, &series(1, ASURA_NEW), "asura").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "asura")
+            .await
+            .unwrap();
+        insert_manhwa_with_chapters(&pool, &series(1, ASURA_NEW), "asura")
+            .await
+            .unwrap();
         s.source_url = ASURA_NEW.into();
         s.chapters = vec![ch(2.0, ASURA_OLD)];
-        assert_eq!(apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(), 1);
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            1
+        );
         assert_eq!(fetch_manhwa(&pool, id).await.unwrap().source_url, ASURA_OLD);
     }
 
     #[tokio::test]
     async fn mark_read_through_marks_only_earlier_chapters() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/import"), "asura").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(10, "https://x/import"), "asura")
+            .await
+            .unwrap();
         assert_eq!(mark_read_through(&pool, id, 6.0).await.unwrap(), 6);
-        assert_eq!(mark_read_through(&pool, id, 6.0).await.unwrap(), 0, "idempotent");
+        assert_eq!(
+            mark_read_through(&pool, id, 6.0).await.unwrap(),
+            0,
+            "idempotent"
+        );
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::Reading);
         assert_eq!(mark_read_through(&pool, id, 99.0).await.unwrap(), 4);
         assert_eq!(recompute_status(&pool, id).await.unwrap(), Status::UpToDate);
@@ -1244,25 +1442,53 @@ pub(crate) mod tests {
     async fn asura_discovery_ignores_hash_rotation() {
         let pool = pool_or_skip!();
         // In the library under the old hash: the rotated URL is not new.
-        insert_manhwa_with_chapters(&pool, &series(1, ASURA_OLD), "asura").await.unwrap();
-        assert!(!upsert_discovery(&pool, "asura", ASURA_NEW, "SL", None, None, None).await.unwrap());
+        insert_manhwa_with_chapters(&pool, &series(1, ASURA_OLD), "asura")
+            .await
+            .unwrap();
+        assert!(
+            !upsert_discovery(&pool, "asura", ASURA_NEW, "SL", None, None, None)
+                .await
+                .unwrap()
+        );
         assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
         // A tracking query on the discovered URL changes nothing.
         let with_query = format!("{ASURA_NEW}?ref=home");
-        assert!(!upsert_discovery(&pool, "asura", &with_query, "SL", None, None, None).await.unwrap());
+        assert!(
+            !upsert_discovery(&pool, "asura", &with_query, "SL", None, None, None)
+                .await
+                .unwrap()
+        );
         assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
 
         // Dismissed under one hash, re-surfaced under another: stays dismissed.
         let a = "https://asurascans.com/comics/tower-of-god-00aa11bb";
         let b = "https://asuracomic.net/series/tower-of-god-22cc33dd/";
-        assert!(upsert_discovery(&pool, "asura", a, "ToG", None, Some(1.0), None).await.unwrap());
+        assert!(
+            upsert_discovery(&pool, "asura", a, "ToG", None, Some(1.0), None)
+                .await
+                .unwrap()
+        );
         let d = fetch_discoveries(&pool).await.unwrap();
         dismiss_discovery(&pool, d[0].id).await.unwrap();
-        assert!(!upsert_discovery(&pool, "asura", b, "ToG", None, Some(2.0), None).await.unwrap());
+        assert!(
+            !upsert_discovery(&pool, "asura", b, "ToG", None, Some(2.0), None)
+                .await
+                .unwrap()
+        );
         assert!(fetch_discoveries(&pool).await.unwrap().is_empty());
 
         // Other sources still compare exact URLs.
-        assert!(upsert_discovery(&pool, "mangack", "https://m/manga/solo-leveling-1a2b3c4d/", "SL", None, None, None).await.unwrap());
+        assert!(upsert_discovery(
+            &pool,
+            "mangack",
+            "https://m/manga/solo-leveling-1a2b3c4d/",
+            "SL",
+            None,
+            None,
+            None
+        )
+        .await
+        .unwrap());
     }
 
     // --- M9: per-series poll health ---
@@ -1271,7 +1497,9 @@ pub(crate) mod tests {
     async fn poll_failure_is_recorded_and_cleared_by_the_next_success() {
         let pool = pool_or_skip!();
         let s = series(1, "https://x/h");
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangack").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangack")
+            .await
+            .unwrap();
         let m = fetch_manhwa(&pool, id).await.unwrap();
         assert_eq!((m.last_error, m.failing_since), (None, None));
 
@@ -1283,17 +1511,28 @@ pub(crate) mod tests {
 
         // A later failure updates the error but keeps the first failure time.
         sqlx::query("UPDATE manhwa SET failing_since = '2026-01-02 03:04:05+00' WHERE id = $1")
-            .bind(id).execute(&pool).await.unwrap();
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
         record_poll_failure(&pool, id, "HTTP 503").await.unwrap();
         let all = fetch_all_manhwa(&pool).await.unwrap();
         assert_eq!(all[0].last_error.as_deref(), Some("HTTP 503"));
-        assert!(all[0].failing_since.as_deref().unwrap().starts_with("2026-01-02"));
+        assert!(all[0]
+            .failing_since
+            .as_deref()
+            .unwrap()
+            .starts_with("2026-01-02"));
 
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
         let m = fetch_manhwa(&pool, id).await.unwrap();
         assert_eq!((m.last_error, m.failing_since), (None, None));
-        let ok: bool = sqlx::query_scalar("SELECT last_ok_at IS NOT NULL FROM manhwa WHERE id = $1")
-            .bind(id).fetch_one(&pool).await.unwrap();
+        let ok: bool =
+            sqlx::query_scalar("SELECT last_ok_at IS NOT NULL FROM manhwa WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(ok, "success stamps last_ok_at");
     }
 
@@ -1301,37 +1540,72 @@ pub(crate) mod tests {
     async fn a_colliding_chapter_never_replaces_the_stored_one() {
         let pool = pool_or_skip!();
         let url = "https://m/manga/reset";
-        let id = insert_manhwa_with_chapters(&pool, &series(2, url), "mangack").await.unwrap();
-        let ch1 = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 1.0).unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(2, url), "mangack")
+            .await
+            .unwrap();
+        let ch1 = fetch_chapters(&pool, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.number == 1.0)
+            .unwrap();
         mark_read_through(&pool, id, 1.0).await.unwrap();
 
         // Season 2 chapter 1 appears, listed first (newest first).
         let mut s = series(2, url);
         s.chapters.insert(0, ch(1.0, &format!("{url}/s2")));
-        let (inserted, note) = apply_poll_result_noted(&pool, id, &s, "ongoing").await.unwrap();
+        let (inserted, note) = apply_poll_result_noted(&pool, id, &s, "ongoing")
+            .await
+            .unwrap();
         assert_eq!(inserted, 0);
-        assert!(note.as_deref().unwrap_or("").contains("2 chapters share no. 1"));
+        assert!(note
+            .as_deref()
+            .unwrap_or("")
+            .contains("2 chapters share no. 1"));
 
-        let after = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 1.0).unwrap();
+        let after = fetch_chapters(&pool, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.number == 1.0)
+            .unwrap();
         assert_eq!(after.id, ch1.id);
         assert_eq!(after.url, ch1.url, "stored URL was overwritten");
         assert!(after.completed, "read mark moved");
-        assert!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict.is_some());
+        assert!(fetch_manhwa(&pool, id)
+            .await
+            .unwrap()
+            .chapter_conflict
+            .is_some());
 
         // A clean poll clears the note.
-        apply_poll_result(&pool, id, &series(2, url), "ongoing").await.unwrap();
-        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict, None);
+        apply_poll_result(&pool, id, &series(2, url), "ongoing")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch_manhwa(&pool, id).await.unwrap().chapter_conflict,
+            None
+        );
     }
 
     #[tokio::test]
     async fn a_moved_chapter_url_still_updates() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(1, "https://a/comics/s-aaaaaaaa"), "asura").await.unwrap();
+        let id =
+            insert_manhwa_with_chapters(&pool, &series(1, "https://a/comics/s-aaaaaaaa"), "asura")
+                .await
+                .unwrap();
         let moved = series(1, "https://a/comics/s-bbbbbbbb");
-        let (_, note) = apply_poll_result_noted(&pool, id, &moved, "ongoing").await.unwrap();
+        let (_, note) = apply_poll_result_noted(&pool, id, &moved, "ongoing")
+            .await
+            .unwrap();
         assert_eq!(note, None);
         let c = &fetch_chapters(&pool, id).await.unwrap()[0];
-        assert!(c.url.starts_with("https://a/comics/s-bbbbbbbb"), "{}", c.url);
+        assert!(
+            c.url.starts_with("https://a/comics/s-bbbbbbbb"),
+            "{}",
+            c.url
+        );
     }
 
     #[tokio::test]
@@ -1339,15 +1613,23 @@ pub(crate) mod tests {
         let pool = pool_or_skip!();
         let mut s = series(2, "https://m/manga/new-reset");
         s.chapters.push(ch(2.0, "https://m/manga/new-reset/s2"));
-        let id = insert_manhwa_with_chapters(&pool, &s, "mangack").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangack")
+            .await
+            .unwrap();
         assert_eq!(fetch_chapters(&pool, id).await.unwrap().len(), 2);
-        assert!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict.is_some());
+        assert!(fetch_manhwa(&pool, id)
+            .await
+            .unwrap()
+            .chapter_conflict
+            .is_some());
     }
 
     #[tokio::test]
     async fn poll_failure_text_is_truncated_on_a_char_boundary() {
         let pool = pool_or_skip!();
-        let id = insert_manhwa_with_chapters(&pool, &series(1, "https://x/u"), "mangack").await.unwrap();
+        let id = insert_manhwa_with_chapters(&pool, &series(1, "https://x/u"), "mangack")
+            .await
+            .unwrap();
         let long = "한".repeat(400);
         record_poll_failure(&pool, id, &long).await.unwrap();
         let e = fetch_manhwa(&pool, id).await.unwrap().last_error.unwrap();

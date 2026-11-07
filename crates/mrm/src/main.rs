@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
+    cursor::Show,
     event::{Event, EventStream, KeyEventKind},
     execute,
-    cursor::Show,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
@@ -48,9 +48,12 @@ fn startup_cleanup_tmp() {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("mrm_") { continue; }
+        if !name.starts_with("mrm_") {
+            continue;
+        }
 
-        let age_ok = entry.metadata()
+        let age_ok = entry
+            .metadata()
             .and_then(|m| m.modified())
             .map(|t| t < cutoff)
             .unwrap_or(false);
@@ -78,23 +81,29 @@ fn parse_args() -> Mode {
     for arg in &args[1..] {
         match arg.as_str() {
             "--daemon" | "-d" => return Mode::Daemon,
-            "--serve"         => return Mode::Serve,
-            "--once"          => return Mode::Once,
-            "--import"        => {
+            "--serve" => return Mode::Serve,
+            "--once" => return Mode::Once,
+            "--import" => {
                 let rest = &args[2..];
                 let Some(path) = rest.iter().find(|a| !a.starts_with("--")) else {
                     eprintln!("mrm: --import needs a file");
                     std::process::exit(2);
                 };
                 let dry_run = rest.iter().any(|a| a == "--dry-run");
-                return Mode::Import { path: path.clone(), dry_run };
+                return Mode::Import {
+                    path: path.clone(),
+                    dry_run,
+                };
             }
-            "--help" | "-h"   => {
+            "--help" | "-h" => {
                 eprintln!("Usage: mrm [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --daemon, -d  Run as background poller (no TUI)");
-                eprintln!("  --serve       Serve the JSON API for mrm-phone (MRM_SERVE_ADDR, default {})", serve::DEFAULT_ADDR);
+                eprintln!(
+                    "  --serve       Serve the JSON API for mrm-phone (MRM_SERVE_ADDR, default {})",
+                    serve::DEFAULT_ADDR
+                );
                 eprintln!("  --once        Poll once and exit");
                 eprintln!("  --import FILE [--dry-run]");
                 eprintln!("                Add series by title, one per line: `title<TAB>read through chapter`");
@@ -115,24 +124,30 @@ fn parse_args() -> Mode {
 async fn main() -> Result<()> {
     let mode = parse_args();
 
-    let config = config::load_config()
-        .context("Config required — create config.toml (see README)")?;
+    let config =
+        config::load_config().context("Config required — create config.toml (see README)")?;
     let url = config::resolve_database_url(
-        std::env::var("MRM_DATABASE_URL").ok(), &config.db, &config::config_dir())?;
+        std::env::var("MRM_DATABASE_URL").ok(),
+        &config.db,
+        &config::config_dir(),
+    )?;
     let pool = match db::open_db(&url).await {
         Ok(p) => p,
-        Err(e) => { eprintln!("mrm: database error: {e:#}"); return Err(e); }
+        Err(e) => {
+            eprintln!("mrm: database error: {e:#}");
+            return Err(e);
+        }
     };
 
     match mode {
         Mode::Daemon => run_daemon(pool, config).await,
-        Mode::Serve  => run_serve(pool, config).await,
-        Mode::Once   => run_once(pool, config).await,
+        Mode::Serve => run_serve(pool, config).await,
+        Mode::Once => run_once(pool, config).await,
         Mode::Import { path, dry_run } => {
             let registry = scraper::build_registry(&config);
             import::run(&pool, &registry, &path, dry_run).await
         }
-        Mode::Tui    => run_tui(pool, config).await,
+        Mode::Tui => run_tui(pool, config).await,
     }
 }
 
@@ -141,7 +156,10 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
-    eprintln!("mrm: daemon mode — polling every {} minutes", config.notifications.poll_interval_minutes);
+    eprintln!(
+        "mrm: daemon mode — polling every {} minutes",
+        config.notifications.poll_interval_minutes
+    );
     eprintln!("mrm: press Ctrl-C to stop");
     warn_unknown_sources(&config);
 
@@ -152,7 +170,13 @@ async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     let (tx, _) = mpsc::channel::<ScraperEvent>(1);
 
     let handle = tokio::spawn(scraper::coordinator_task(
-        pool, config, registry, shutdown.clone(), Arc::new(Notify::new()), tx, false,
+        pool,
+        config,
+        registry,
+        shutdown.clone(),
+        Arc::new(Notify::new()),
+        tx,
+        false,
     ));
 
     let _ = tokio::signal::ctrl_c().await;
@@ -210,7 +234,10 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
             None => continue,
         };
         if streaks.skip(&manhwa.source) {
-            eprintln!("  - {}: skipped, {} keeps failing", manhwa.title, manhwa.source);
+            eprintln!(
+                "  - {}: skipped, {} keeps failing",
+                manhwa.title, manhwa.source
+            );
             continue;
         }
 
@@ -219,7 +246,9 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
             Err(e) => {
                 eprintln!("  ✗ {}: {e:#}", manhwa.title);
                 streaks.failed(&manhwa.source);
-                if let Err(db_err) = db::record_poll_failure(&pool, manhwa.id, &format!("{e:#}")).await {
+                if let Err(db_err) =
+                    db::record_poll_failure(&pool, manhwa.id, &format!("{e:#}")).await
+                {
                     eprintln!("    (could not record the failure: {db_err})");
                 }
                 continue;
@@ -227,13 +256,14 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
         };
         streaks.succeeded(&manhwa.source);
 
-        let new_count = match db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("  ✗ {}: {e}", manhwa.title);
-                continue;
-            }
-        };
+        let new_count =
+            match db::apply_poll_result(&pool, manhwa.id, &series, &manhwa.pub_status).await {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("  ✗ {}: {e}", manhwa.title);
+                    continue;
+                }
+            };
 
         if new_count > 0 {
             eprintln!("  + {} — {} new chapter(s)", manhwa.title, new_count);
@@ -243,7 +273,9 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     }
 
     if !notifier::can_push(&config.notifications) {
-        eprintln!("\nmrm: no ntfy sink in this build/config — leaving chapters for the notifying host");
+        eprintln!(
+            "\nmrm: no ntfy sink in this build/config — leaving chapters for the notifying host"
+        );
     } else {
         let claimed = db::claim_unnotified(&pool).await?;
         if !claimed.is_empty() && config.notifications.enabled {
@@ -278,7 +310,9 @@ async fn run_once(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
                 entry.cover_url.as_deref(),
                 entry.chapter_number,
                 entry.released_at.as_deref(),
-            ).await {
+            )
+            .await
+            {
                 new_disc += 1;
             }
         }
@@ -355,7 +389,10 @@ async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
     let coordinator_config = config.clone();
     let mut app = match App::new(pool.clone(), picker, config, app_tx).await {
         Ok(a) => a,
-        Err(e) => { eprintln!("mrm: app init error: {e}"); return Err(e); }
+        Err(e) => {
+            eprintln!("mrm: app init error: {e}");
+            return Err(e);
+        }
     };
 
     // The coordinator shares the App's registry and poll-now handle.
@@ -371,7 +408,9 @@ async fn run_tui(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
 
     // Spawn background cover image preload
     {
-        let preload_list: Vec<(i64, Option<String>)> = app.manhwa_list.iter()
+        let preload_list: Vec<(i64, Option<String>)> = app
+            .manhwa_list
+            .iter()
             .map(|m| (m.id, m.cover_url.clone()))
             .collect();
         tokio::spawn(cover_cache::preload_covers(
@@ -474,11 +513,24 @@ mod tests {
     static RESTORES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    fn count_restore() { RESTORES.fetch_add(1, Ordering::SeqCst); }
-    fn record_log(s: &str) { LOGGED.lock().unwrap_or_else(|e| e.into_inner()).push(s.to_string()); }
+    fn count_restore() {
+        RESTORES.fetch_add(1, Ordering::SeqCst);
+    }
+    fn record_log(s: &str) {
+        LOGGED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(s.to_string());
+    }
     /// Entries mentioning `needle` (other tests' panics may be logged too).
     fn logged_with(needle: &str) -> Vec<String> {
-        LOGGED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| l.contains(needle)).cloned().collect()
+        LOGGED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|l| l.contains(needle))
+            .cloned()
+            .collect()
     }
 
     #[test]
@@ -494,19 +546,39 @@ mod tests {
         // UI thread: restore + chain, nothing logged.
         let _ = std::panic::catch_unwind(|| panic!("ui boom"));
         assert_eq!(RESTORES.load(Ordering::SeqCst), 1);
-        assert!(called.load(Ordering::SeqCst), "previous hook was not called");
+        assert!(
+            called.load(Ordering::SeqCst),
+            "previous hook was not called"
+        );
         assert!(logged_with("ui boom").is_empty());
 
         // Another thread: logged, no restore, no chaining.
         called.store(false, Ordering::SeqCst);
-        std::thread::Builder::new().name("worker-x".into())
-            .spawn(|| panic!("task boom")).unwrap().join().unwrap_err();
-        assert_eq!(RESTORES.load(Ordering::SeqCst), 1, "off-thread panic restored the terminal");
-        assert!(!called.load(Ordering::SeqCst), "off-thread panic reached the stderr hook");
+        std::thread::Builder::new()
+            .name("worker-x".into())
+            .spawn(|| panic!("task boom"))
+            .unwrap()
+            .join()
+            .unwrap_err();
+        assert_eq!(
+            RESTORES.load(Ordering::SeqCst),
+            1,
+            "off-thread panic restored the terminal"
+        );
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "off-thread panic reached the stderr hook"
+        );
         let logged = logged_with("task boom");
         assert_eq!(logged.len(), 1);
-        assert!(logged[0].contains("task boom") && logged[0].contains("worker-x"), "{logged:?}");
-        assert!(logged[0].contains("main.rs"), "location missing: {logged:?}");
+        assert!(
+            logged[0].contains("task boom") && logged[0].contains("worker-x"),
+            "{logged:?}"
+        );
+        assert!(
+            logged[0].contains("main.rs"),
+            "location missing: {logged:?}"
+        );
         let _ = std::panic::take_hook();
     }
 
@@ -517,14 +589,25 @@ mod tests {
         LOGGED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         std::panic::set_hook(Box::new(|_| {}));
         install_panic_hook_with(count_restore, record_log);
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         let r = rt.block_on(async { tokio::spawn(async { panic!("page task") }).await });
         assert!(r.unwrap_err().is_panic());
         let r = rt.block_on(async { tokio::task::spawn_blocking(|| panic!("image work")).await });
         assert!(r.unwrap_err().is_panic());
         let _ = std::panic::take_hook();
-        assert_eq!(RESTORES.load(Ordering::SeqCst), 0, "task panic restored the terminal");
-        assert_eq!(logged_with("page task").len() + logged_with("image work").len(), 2);
+        assert_eq!(
+            RESTORES.load(Ordering::SeqCst),
+            0,
+            "task panic restored the terminal"
+        );
+        assert_eq!(
+            logged_with("page task").len() + logged_with("image work").len(),
+            2
+        );
     }
 
     #[test]

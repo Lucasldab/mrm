@@ -19,21 +19,21 @@ use crate::config::Config;
 /// Full series metadata + chapter list returned by get_series().
 #[derive(Debug, Clone)]
 pub struct SeriesData {
-    pub title:      String,
-    pub cover_url:  Option<String>,
+    pub title: String,
+    pub cover_url: Option<String>,
     pub source_url: String,
-    pub pub_status: String,   // "ongoing" | "hiatus" | "completed"
+    pub pub_status: String, // "ongoing" | "hiatus" | "completed"
     pub description: Option<String>,
-    pub chapters:   Vec<ChapterData>,
+    pub chapters: Vec<ChapterData>,
 }
 
 /// Single chapter entry returned as part of SeriesData.chapters.
 #[derive(Debug, Clone)]
 pub struct ChapterData {
-    pub number:      f64,
-    pub title:       Option<String>,
-    pub url:         String,
-    pub released_at: Option<String>,  // "YYYY-MM-DD" or None
+    pub number: f64,
+    pub title: Option<String>,
+    pub url: String,
+    pub released_at: Option<String>, // "YYYY-MM-DD" or None
 }
 
 /// Several different chapters with one number (a season or volume restarting
@@ -49,7 +49,10 @@ pub fn resolve_collisions(
     let mut order: Vec<u64> = Vec::new();
     for c in &chapters {
         let key = c.number.to_bits();
-        let list = urls.entry(key).or_insert_with(|| { order.push(key); Vec::new() });
+        let list = urls.entry(key).or_insert_with(|| {
+            order.push(key);
+            Vec::new()
+        });
         if !list.contains(&c.url) {
             list.push(c.url.clone());
         }
@@ -58,7 +61,10 @@ pub fn resolve_collisions(
     let mut conflicts: Vec<(f64, usize, String)> = Vec::new();
     for key in &order {
         let list = &urls[key];
-        let chosen = stored.get(key).filter(|s| list.contains(s)).cloned()
+        let chosen = stored
+            .get(key)
+            .filter(|s| list.contains(s))
+            .cloned()
             .unwrap_or_else(|| list[0].clone());
         if list.len() > 1 {
             conflicts.push((f64::from_bits(*key), list.len(), chosen.clone()));
@@ -74,7 +80,10 @@ pub fn resolve_collisions(
         }
     }
     let note = conflicts.first().map(|(n, count, url)| {
-        let path = url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| &r[i..])).unwrap_or(url);
+        let path = url
+            .split_once("://")
+            .and_then(|(_, r)| r.find('/').map(|i| &r[i..]))
+            .unwrap_or(url);
         let mut s = format!("{count} chapters share no. {n} (season reset?): keeping {path}");
         if conflicts.len() > 1 {
             s.push_str(&format!(" (+{} more numbers)", conflicts.len() - 1));
@@ -87,11 +96,11 @@ pub fn resolve_collisions(
 /// One result from a search() call.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    pub title:      String,
-    pub cover_url:  Option<String>,
+    pub title: String,
+    pub cover_url: Option<String>,
     pub source_url: String,
     pub pub_status: String,
-    pub source:     String,   // "mangadex" | "mangack"
+    pub source: String, // "mangadex" | "mangack"
 }
 
 /// One entry from a latest_chapters() feed — a candidate for the Discover
@@ -99,11 +108,11 @@ pub struct SearchResult {
 /// the cover grid and, on add, hand the source_url to get_series().
 #[derive(Debug, Clone)]
 pub struct DiscoveryEntry {
-    pub title:          String,
-    pub cover_url:      Option<String>,
-    pub source_url:     String,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub source_url: String,
     pub chapter_number: Option<f64>,
-    pub released_at:    Option<String>,
+    pub released_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,9 +160,15 @@ pub fn build_registry(config: &Config) -> Registry {
             continue;
         }
         match name.as_str() {
-            "mangadex" => { registry.insert("mangadex", Box::new(MangaDexScraper::new())); }
-            "mangack"  => { registry.insert("mangack",  Box::new(MangackScraper::new())); }
-            "asura"    => { registry.insert("asura",    Box::new(AsuraScraper::new())); }
+            "mangadex" => {
+                registry.insert("mangadex", Box::new(MangaDexScraper::new()));
+            }
+            "mangack" => {
+                registry.insert("mangack", Box::new(MangackScraper::new()));
+            }
+            "asura" => {
+                registry.insert("asura", Box::new(AsuraScraper::new()));
+            }
             _ => {}
         }
     }
@@ -163,7 +178,9 @@ pub fn build_registry(config: &Config) -> Registry {
 /// Enabled source names in the config that no scraper implements (for a
 /// startup warning in the non-TUI modes).
 pub fn unknown_sources(config: &Config) -> Vec<String> {
-    let mut v: Vec<String> = config.sources.iter()
+    let mut v: Vec<String> = config
+        .sources
+        .iter()
         .filter(|(n, c)| c.enabled && !matches!(n.as_str(), "mangadex" | "mangack" | "asura"))
         .map(|(n, _)| n.clone())
         .collect();
@@ -175,9 +192,9 @@ pub fn unknown_sources(config: &Config) -> Vec<String> {
 pub fn source_rank(name: &str) -> u8 {
     match name {
         "mangadex" => 0,
-        "mangack"  => 1,
-        "asura"    => 2,
-        _          => 3,
+        "mangack" => 1,
+        "asura" => 2,
+        _ => 3,
     }
 }
 
@@ -185,9 +202,9 @@ pub fn source_rank(name: &str) -> u8 {
 pub fn source_label(name: &str) -> &str {
     match name {
         "mangadex" => "MangaDex",
-        "mangack"  => "MangaCK",
-        "asura"    => "Asura",
-        other      => other,
+        "mangack" => "MangaCK",
+        "asura" => "Asura",
+        other => other,
     }
 }
 
@@ -204,15 +221,14 @@ pub async fn search_registry(registry: &Registry, query: &str) -> (Vec<SearchRes
         return (Vec::new(), vec!["No sources enabled in config.toml".into()]);
     }
     names.sort_by_key(|n| (source_rank(n), *n));
-    let outcomes = futures::future::join_all(
-        names.iter().map(|n| registry[*n].search(query)),
-    ).await;
+    let outcomes =
+        futures::future::join_all(names.iter().map(|n| registry[*n].search(query))).await;
 
     let mut merged = Vec::new();
     let mut errors = Vec::new();
     for (name, outcome) in names.iter().zip(outcomes) {
         match outcome {
-            Ok(r)  => merged.extend(r),
+            Ok(r) => merged.extend(r),
             Err(e) => errors.push(format!("{}: {e}", source_label(name))),
         }
     }
@@ -227,8 +243,7 @@ pub async fn search_registry(registry: &Registry, query: &str) -> (Vec<SearchRes
 /// non-browser requests, so Asura gets a realistic Chrome UA; everyone else
 /// a short browser-ish one.
 pub fn image_client(source: &str) -> reqwest::Result<reqwest::Client> {
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30));
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
     let builder = if source == "asura" {
         builder.user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -263,15 +278,21 @@ pub async fn fetch_image(
 /// themes fill with a `data:` placeholder. `data:` URIs and blanks are skipped.
 pub(crate) fn img_url(img: &scraper::ElementRef<'_>) -> Option<String> {
     let el = img.value();
-    let srcset_first = el.attr("srcset")
+    let srcset_first = el
+        .attr("srcset")
         .and_then(|s| s.split(',').next())
         .and_then(|c| c.split_whitespace().next());
-    [el.attr("data-src"), el.attr("data-lazy-src"), srcset_first, el.attr("src")]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|u| !u.is_empty() && !u.starts_with("data:"))
-        .map(str::to_string)
+    [
+        el.attr("data-src"),
+        el.attr("data-lazy-src"),
+        srcset_first,
+        el.attr("src"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|u| !u.is_empty() && !u.starts_with("data:"))
+    .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,13 +308,16 @@ pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// retry classifier sees the header, which `error_for_status` drops.
 #[derive(Debug)]
 pub(crate) struct HttpStatus {
-    pub status:      u16,
+    pub status: u16,
     pub retry_after: Option<Duration>,
 }
 
 impl HttpStatus {
     pub(crate) fn new(status: u16, retry_after: Option<&str>) -> Self {
-        Self { status, retry_after: retry_after.and_then(|v| parse_retry_after(v, chrono::Utc::now())) }
+        Self {
+            status,
+            retry_after: retry_after.and_then(|v| parse_retry_after(v, chrono::Utc::now())),
+        }
     }
 }
 
@@ -316,20 +340,30 @@ pub(crate) fn parse_retry_after(v: &str, now: chrono::DateTime<chrono::Utc>) -> 
 }
 
 /// `error_for_status` for reqwest that keeps `Retry-After`.
-pub(crate) fn check_reqwest(resp: reqwest::Response) -> std::result::Result<reqwest::Response, HttpStatus> {
+pub(crate) fn check_reqwest(
+    resp: reqwest::Response,
+) -> std::result::Result<reqwest::Response, HttpStatus> {
     let st = resp.status();
     if st.is_client_error() || st.is_server_error() {
-        let ra = resp.headers().get("retry-after").and_then(|v| v.to_str().ok());
+        let ra = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok());
         return Err(HttpStatus::new(st.as_u16(), ra));
     }
     Ok(resp)
 }
 
 /// `error_for_status` for rquest (Asura) that keeps `Retry-After`.
-pub(crate) fn check_rquest(resp: rquest::Response) -> std::result::Result<rquest::Response, HttpStatus> {
+pub(crate) fn check_rquest(
+    resp: rquest::Response,
+) -> std::result::Result<rquest::Response, HttpStatus> {
     let st = resp.status();
     if st.is_client_error() || st.is_server_error() {
-        let ra = resp.headers().get("retry-after").and_then(|v| v.to_str().ok());
+        let ra = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok());
         return Err(HttpStatus::new(st.as_u16(), ra));
     }
     Ok(resp)
@@ -342,11 +376,15 @@ pub(crate) trait CheckStatus: Sized {
 }
 
 impl CheckStatus for reqwest::Response {
-    fn check_status(self) -> std::result::Result<Self, HttpStatus> { check_reqwest(self) }
+    fn check_status(self) -> std::result::Result<Self, HttpStatus> {
+        check_reqwest(self)
+    }
 }
 
 impl CheckStatus for rquest::Response {
-    fn check_status(self) -> std::result::Result<Self, HttpStatus> { check_rquest(self) }
+    fn check_status(self) -> std::result::Result<Self, HttpStatus> {
+        check_rquest(self)
+    }
 }
 
 /// What [`retry`] does after a failed attempt.
@@ -365,7 +403,7 @@ fn classify_status(status: u16, retry_after: Option<Duration>) -> RetryDecision 
         match retry_after {
             Some(d) if d > MAX_RETRY_AFTER => RetryDecision::Fail,
             Some(d) => RetryDecision::After(d),
-            None    => RetryDecision::Backoff,
+            None => RetryDecision::Backoff,
         }
     } else {
         RetryDecision::Fail
@@ -403,7 +441,11 @@ pub(crate) fn classify(err: &anyhow::Error) -> RetryDecision {
     RetryDecision::Fail
 }
 
-const BACKOFF: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+const BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 
 /// Up to 3 attempts with 1 s, 2 s backoff (or the server's `Retry-After`; one
 /// above 60 s fails immediately), but only for errors [`classify`] calls transient.
@@ -431,15 +473,15 @@ where
     loop {
         let err = match f().await {
             Ok(val) => return Ok(val),
-            Err(e)  => e,
+            Err(e) => e,
         };
         attempt += 1;
         if attempt >= delays.len() {
             return Err(err);
         }
         match classify(&err) {
-            RetryDecision::Fail     => return Err(err),
-            RetryDecision::Backoff  => tokio::time::sleep(delays[attempt - 1]).await,
+            RetryDecision::Fail => return Err(err),
+            RetryDecision::Backoff => tokio::time::sleep(delays[attempt - 1]).await,
             RetryDecision::After(d) => tokio::time::sleep(d).await,
         }
     }
@@ -449,16 +491,16 @@ where
 // Submodule declarations (populated in later plans/phases)
 // ---------------------------------------------------------------------------
 
-pub mod mangadex;   // Plan 02
+pub mod mangadex; // Plan 02
 pub use mangadex::MangaDexScraper;
 
-pub mod mangack;    // Phase 3 Plan 01
+pub mod mangack; // Phase 3 Plan 01
 pub use mangack::MangackScraper;
 
 pub mod asura;
 pub use asura::AsuraScraper;
 
-pub mod coordinator;  // Phase 5 Plan 02
+pub mod coordinator; // Phase 5 Plan 02
 pub use coordinator::{coordinator_task, stop_coordinator, ScraperEvent};
 
 // ---------------------------------------------------------------------------
@@ -478,7 +520,8 @@ mod tests {
     fn config_with(sources: &str) -> crate::config::Config {
         crate::config::parse_config(&format!(
             "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n{sources}"
-        )).unwrap()
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -489,8 +532,14 @@ mod tests {
         );
         let reg = build_registry(&cfg);
         assert!(reg.contains_key("mangadex"));
-        assert!(!reg.contains_key("mangack"), "disabled source must not be in the registry");
-        assert!(!reg.contains_key("asura"), "unconfigured source must not be in the registry");
+        assert!(
+            !reg.contains_key("mangack"),
+            "disabled source must not be in the registry"
+        );
+        assert!(
+            !reg.contains_key("asura"),
+            "unconfigured source must not be in the registry"
+        );
         assert_eq!(reg.len(), 1);
     }
 
@@ -529,8 +578,14 @@ mod tests {
             first_img(r#"<img src="data:," srcset="https://c/3.webp 1x, https://c/3@2x.webp 2x">"#),
             Some("https://c/3.webp".into()),
         );
-        assert_eq!(first_img(r#"<img src="https://c/4.png">"#), Some("https://c/4.png".into()));
-        assert_eq!(first_img(r#"<img src="data:image/gif;base64,R0" data-src=" ">"#), None);
+        assert_eq!(
+            first_img(r#"<img src="https://c/4.png">"#),
+            Some("https://c/4.png".into())
+        );
+        assert_eq!(
+            first_img(r#"<img src="data:image/gif;base64,R0" data-src=" ">"#),
+            None
+        );
     }
 
     // --- M9: retry classification ---
@@ -544,35 +599,58 @@ mod tests {
         assert_eq!(classify(&status(404, None)), RetryDecision::Fail);
         assert_eq!(classify(&status(403, None)), RetryDecision::Fail);
         assert_eq!(classify(&status(400, Some("5"))), RetryDecision::Fail);
-        assert_eq!(classify(&anyhow::anyhow!("Asura: no <h1> title")), RetryDecision::Fail);
+        assert_eq!(
+            classify(&anyhow::anyhow!("Asura: no <h1> title")),
+            RetryDecision::Fail
+        );
     }
 
     #[test]
     fn server_errors_back_off() {
         assert_eq!(classify(&status(500, None)), RetryDecision::Backoff);
         assert_eq!(classify(&status(502, None)), RetryDecision::Backoff);
-        assert_eq!(classify(&status(503, Some("7"))), RetryDecision::After(Duration::from_secs(7)));
+        assert_eq!(
+            classify(&status(503, Some("7"))),
+            RetryDecision::After(Duration::from_secs(7))
+        );
     }
 
     #[test]
     fn too_many_requests_honours_retry_after_and_fails_beyond_the_cap() {
         assert_eq!(classify(&status(429, None)), RetryDecision::Backoff);
-        assert_eq!(classify(&status(429, Some("5"))), RetryDecision::After(Duration::from_secs(5)));
-        assert_eq!(classify(&status(429, Some("60"))), RetryDecision::After(MAX_RETRY_AFTER));
+        assert_eq!(
+            classify(&status(429, Some("5"))),
+            RetryDecision::After(Duration::from_secs(5))
+        );
+        assert_eq!(
+            classify(&status(429, Some("60"))),
+            RetryDecision::After(MAX_RETRY_AFTER)
+        );
         assert_eq!(classify(&status(429, Some("61"))), RetryDecision::Fail);
         assert_eq!(classify(&status(503, Some("3600"))), RetryDecision::Fail);
-        assert_eq!(classify(&status(429, Some("garbage"))), RetryDecision::Backoff);
+        assert_eq!(
+            classify(&status(429, Some("garbage"))),
+            RetryDecision::Backoff
+        );
     }
 
     #[test]
     fn retry_after_http_date() {
-        let now = chrono::DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT")
+            .unwrap()
+            .to_utc();
         assert_eq!(
             parse_retry_after("Wed, 21 Oct 2015 07:28:10 GMT", now),
             Some(Duration::from_secs(10)),
         );
-        assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:27:00 GMT", now), Some(Duration::ZERO));
-        assert_eq!(parse_retry_after(" 12 ", now), Some(Duration::from_secs(12)));
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:27:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after(" 12 ", now),
+            Some(Duration::from_secs(12))
+        );
         assert_eq!(parse_retry_after("soon", now), None);
     }
 
@@ -603,25 +681,55 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         tokio::spawn(async move {
             let mut held = Vec::new();
-            while let Ok((sock, _)) = l.accept().await { held.push(sock); }
+            while let Ok((sock, _)) = l.accept().await {
+                held.push(sock);
+            }
         });
         port
     }
 
     #[tokio::test]
     async fn reqwest_transport_errors_back_off_and_decode_errors_fail() {
-        let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build().unwrap();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
 
-        let e = client.get(format!("http://127.0.0.1:{}/", closed_port())).send().await.unwrap_err();
-        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff, "connection refused");
+        let e = client
+            .get(format!("http://127.0.0.1:{}/", closed_port()))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify(&anyhow::Error::new(e)),
+            RetryDecision::Backoff,
+            "connection refused"
+        );
 
-        let e = client.get(format!("http://127.0.0.1:{}/", silent().await)).send().await.unwrap_err();
-        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff, "timeout");
+        let e = client
+            .get(format!("http://127.0.0.1:{}/", silent().await))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify(&anyhow::Error::new(e)),
+            RetryDecision::Backoff,
+            "timeout"
+        );
 
-        let port = serve("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc").await;
-        let resp = client.get(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
+        let port =
+            serve("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc").await;
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
         let e = resp.json::<serde_json::Value>().await.unwrap_err();
-        assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Fail, "JSON decode");
+        assert_eq!(
+            classify(&anyhow::Error::new(e)),
+            RetryDecision::Fail,
+            "JSON decode"
+        );
     }
 
     #[tokio::test]
@@ -640,8 +748,15 @@ mod tests {
 
     #[tokio::test]
     async fn rquest_connection_refused_backs_off() {
-        let client = rquest::Client::builder().timeout(Duration::from_millis(200)).build().unwrap();
-        let e = client.get(format!("http://127.0.0.1:{}/", closed_port())).send().await.unwrap_err();
+        let client = rquest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let e = client
+            .get(format!("http://127.0.0.1:{}/", closed_port()))
+            .send()
+            .await
+            .unwrap_err();
         assert_eq!(classify(&anyhow::Error::new(e)), RetryDecision::Backoff);
     }
 
@@ -654,7 +769,8 @@ mod tests {
         let r: Result<()> = retry_with(&delays, || async {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(status(404, None))
-        }).await;
+        })
+        .await;
         assert!(r.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "404 must not be retried");
 
@@ -662,14 +778,24 @@ mod tests {
         let r: Result<()> = retry_with(&delays, || async {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(status(503, None))
-        }).await;
+        })
+        .await;
         assert!(r.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "503 is retried up to the attempt limit");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "503 is retried up to the attempt limit"
+        );
 
         let calls = AtomicUsize::new(0);
         let r = retry_with(&delays, || async {
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 { Err(status(500, None)) } else { Ok(7) }
-        }).await;
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(status(500, None))
+            } else {
+                Ok(7)
+            }
+        })
+        .await;
         assert_eq!(r.unwrap(), 7);
     }
 
@@ -685,19 +811,35 @@ mod collision_tests {
     use super::*;
 
     fn ch(n: f64, url: &str) -> ChapterData {
-        ChapterData { number: n, title: None, url: url.into(), released_at: None }
+        ChapterData {
+            number: n,
+            title: None,
+            url: url.into(),
+            released_at: None,
+        }
     }
 
     #[test]
     fn stored_url_wins_a_season_reset_either_order() {
-        let stored = HashMap::from([(1f64.to_bits(), "https://m/chapter/x-chapter-1/".to_string())]);
+        let stored =
+            HashMap::from([(1f64.to_bits(), "https://m/chapter/x-chapter-1/".to_string())]);
         for page in [
-            vec![ch(1.0, "https://m/chapter/x-s2-chapter-1/"), ch(2.0, "https://m/chapter/x-chapter-2/"), ch(1.0, "https://m/chapter/x-chapter-1/")],
-            vec![ch(1.0, "https://m/chapter/x-chapter-1/"), ch(2.0, "https://m/chapter/x-chapter-2/"), ch(1.0, "https://m/chapter/x-s2-chapter-1/")],
+            vec![
+                ch(1.0, "https://m/chapter/x-s2-chapter-1/"),
+                ch(2.0, "https://m/chapter/x-chapter-2/"),
+                ch(1.0, "https://m/chapter/x-chapter-1/"),
+            ],
+            vec![
+                ch(1.0, "https://m/chapter/x-chapter-1/"),
+                ch(2.0, "https://m/chapter/x-chapter-2/"),
+                ch(1.0, "https://m/chapter/x-s2-chapter-1/"),
+            ],
         ] {
             let (kept, note) = resolve_collisions(page, &stored);
             assert_eq!(kept.len(), 2);
-            assert!(kept.iter().any(|c| c.url == "https://m/chapter/x-chapter-1/"));
+            assert!(kept
+                .iter()
+                .any(|c| c.url == "https://m/chapter/x-chapter-1/"));
             assert!(!kept.iter().any(|c| c.url.contains("s2")));
             let note = note.expect("collision must be reported");
             assert!(note.contains("2 chapters share no. 1"), "{note}");
@@ -708,7 +850,9 @@ mod collision_tests {
     #[test]
     fn without_a_stored_url_the_first_listed_wins() {
         let (kept, note) = resolve_collisions(
-            vec![ch(1.0, "https://m/a-1"), ch(1.0, "https://m/b-1")], &HashMap::new());
+            vec![ch(1.0, "https://m/a-1"), ch(1.0, "https://m/b-1")],
+            &HashMap::new(),
+        );
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].url, "https://m/a-1");
         assert!(note.is_some());
@@ -717,7 +861,9 @@ mod collision_tests {
     #[test]
     fn same_url_twice_is_not_a_conflict() {
         let (kept, note) = resolve_collisions(
-            vec![ch(3.0, "https://m/c-3"), ch(3.0, "https://m/c-3")], &HashMap::new());
+            vec![ch(3.0, "https://m/c-3"), ch(3.0, "https://m/c-3")],
+            &HashMap::new(),
+        );
         assert_eq!(kept.len(), 1);
         assert_eq!(note, None);
     }
@@ -725,19 +871,30 @@ mod collision_tests {
     #[test]
     fn a_moved_url_alone_is_not_a_conflict() {
         // Asura hash rotation: the stored URL is gone from the page.
-        let stored = HashMap::from([(5f64.to_bits(), "https://a/comics/s-aaaaaaaa/chapter/5".to_string())]);
+        let stored = HashMap::from([(
+            5f64.to_bits(),
+            "https://a/comics/s-aaaaaaaa/chapter/5".to_string(),
+        )]);
         let (kept, note) = resolve_collisions(
-            vec![ch(5.0, "https://a/comics/s-bbbbbbbb/chapter/5")], &stored);
+            vec![ch(5.0, "https://a/comics/s-bbbbbbbb/chapter/5")],
+            &stored,
+        );
         assert_eq!(kept[0].url, "https://a/comics/s-bbbbbbbb/chapter/5");
         assert_eq!(note, None);
     }
 
     #[test]
     fn several_colliding_numbers_give_one_note() {
-        let (kept, note) = resolve_collisions(vec![
-            ch(1.0, "https://m/a-1"), ch(1.0, "https://m/b-1"),
-            ch(2.0, "https://m/a-2"), ch(2.0, "https://m/b-2"), ch(2.0, "https://m/c-2"),
-        ], &HashMap::new());
+        let (kept, note) = resolve_collisions(
+            vec![
+                ch(1.0, "https://m/a-1"),
+                ch(1.0, "https://m/b-1"),
+                ch(2.0, "https://m/a-2"),
+                ch(2.0, "https://m/b-2"),
+                ch(2.0, "https://m/c-2"),
+            ],
+            &HashMap::new(),
+        );
         assert_eq!(kept.len(), 2);
         let note = note.unwrap();
         assert!(note.starts_with("2 chapters share no. 1"), "{note}");

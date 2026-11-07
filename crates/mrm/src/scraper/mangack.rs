@@ -40,20 +40,18 @@ static NAV_LABELS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 // Compiled selectors (lazy, compiled once)
 static SEL_A_MANGA: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"a[href*="/manga/"]"#).unwrap());
-static SEL_IMG: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("img").unwrap());
-static SEL_H1: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("h1").unwrap());
+static SEL_IMG: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
+static SEL_H1: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
 static SEL_READER_IMG: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".reading-content img").unwrap());
-static SEL_TD_TH: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("td, th").unwrap());
+static SEL_TD_TH: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td, th").unwrap());
 static SEL_A_CHAPTER: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"a[href*="/chapter/"]"#).unwrap());
-static SEL_DESCRIPTION: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(
+static SEL_DESCRIPTION: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse(
         r#".summary__content, .description-summary, .summary, .post-content_item .summary-content, [itemprop="description"]"#,
-    ).unwrap());
+    ).unwrap()
+});
 
 // Compiled regex patterns (lazy, compiled once)
 static RE_NEW_BADGE: LazyLock<regex::Regex> =
@@ -79,10 +77,10 @@ static RE_YEAR: LazyLock<regex::Regex> =
 
 fn normalize_status(raw: &str) -> String {
     match raw.to_lowercase().trim() {
-        "ongoing"              => "ongoing",
-        "hiatus"               => "hiatus",
+        "ongoing" => "ongoing",
+        "hiatus" => "hiatus",
         "completed" | "complete" => "completed",
-        _                      => "ongoing",
+        _ => "ongoing",
     }
     .to_string()
 }
@@ -98,10 +96,7 @@ pub struct MangackScraper {
 impl MangackScraper {
     pub fn new() -> Self {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "Accept-Language",
-            "en-US,en;q=0.9".parse().unwrap(),
-        );
+        headers.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
 
         Self {
             client: reqwest::Client::builder()
@@ -254,7 +249,12 @@ fn parse_search_results(html: &str) -> Vec<SearchResult> {
             None => continue,
         };
 
-        let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
+        let title: String = element
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
 
         if title.is_empty() || title.len() < 2 || seen.contains(&href) {
             continue;
@@ -311,7 +311,11 @@ fn parse_series_page(html: &str, source_url: &str) -> Result<SeriesData> {
             chapters = parse_chapter_links(&document, now, Some(base));
         }
     }
-    chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
+    chapters.sort_by(|a, b| {
+        a.number
+            .partial_cmp(&b.number)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(SeriesData {
         title,
@@ -327,7 +331,11 @@ fn find_description(document: &Html) -> Option<String> {
     let node = document.select(&SEL_DESCRIPTION).next()?;
     let text = node.text().collect::<Vec<_>>().join(" ");
     let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn parse_homepage_latest(html: &str) -> Vec<DiscoveryEntry> {
@@ -340,7 +348,12 @@ fn parse_homepage_latest(html: &str) -> Vec<DiscoveryEntry> {
             Some(h) => h.to_string(),
             None => continue,
         };
-        let title: String = element.text().collect::<Vec<_>>().join("").trim().to_string();
+        let title: String = element
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
         if title.is_empty() || title.len() < 2 || seen.contains(&href) {
             continue;
         }
@@ -390,7 +403,9 @@ fn parse_chapter_images(html: &str) -> Vec<String> {
     };
 
     for img in document.select(selector) {
-        let Some(src) = super::img_url(&img) else { continue };
+        let Some(src) = super::img_url(&img) else {
+            continue;
+        };
 
         let low = src.to_lowercase();
 
@@ -513,10 +528,7 @@ fn parse_chapter_links(
         }
 
         // Strip "NEW" badge
-        let label = RE_NEW_BADGE
-            .replace(&raw_label, "")
-            .trim()
-            .to_string();
+        let label = RE_NEW_BADGE.replace(&raw_label, "").trim().to_string();
 
         // Extract chapter number — skip if cannot determine.
         // For the URL pass, use the post-slug portion so digits inside the
@@ -593,8 +605,12 @@ fn extract_chapter_date(
 /// Returns `None` if the URL doesn't look like a series page.
 pub(crate) fn extract_series_slug(source_url: &str) -> Option<String> {
     let path = source_url
-        .split('?').next().unwrap_or(source_url)
-        .split('#').next().unwrap_or(source_url);
+        .split('?')
+        .next()
+        .unwrap_or(source_url)
+        .split('#')
+        .next()
+        .unwrap_or(source_url);
 
     let mut segments = path.split('/').filter(|s| !s.is_empty());
     while let Some(seg) = segments.next() {
@@ -612,7 +628,8 @@ pub(crate) fn extract_series_slug(source_url: &str) -> Option<String> {
 /// `name-2024` → `name`; None when the slug has no `-<digits>` suffix.
 fn strip_numeric_suffix(slug: &str) -> Option<&str> {
     let (base, tail) = slug.rsplit_once('-')?;
-    (!base.is_empty() && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())).then_some(base)
+    (!base.is_empty() && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(base)
 }
 
 /// Does this `/chapter/...` href belong to the series with the given slug?
@@ -623,8 +640,12 @@ fn strip_numeric_suffix(slug: &str) -> Option<&str> {
 /// "popular updates" widgets, related-manga blocks) get filtered out.
 pub(crate) fn chapter_href_matches_slug(href: &str, slug: &str) -> bool {
     let path = href
-        .split('?').next().unwrap_or(href)
-        .split('#').next().unwrap_or(href);
+        .split('?')
+        .next()
+        .unwrap_or(href)
+        .split('#')
+        .next()
+        .unwrap_or(href);
 
     let after = match path.split("/chapter/").nth(1) {
         Some(s) => s,
@@ -637,7 +658,9 @@ pub(crate) fn chapter_href_matches_slug(href: &str, slug: &str) -> bool {
     let needle = format!("{slug}-chapter-");
     // `get` instead of indexing: hrefs from other widgets may hold unencoded
     // non-ASCII, and a byte offset inside a character must not panic.
-    after.get(..needle.len()).is_some_and(|p| p.eq_ignore_ascii_case(&needle))
+    after
+        .get(..needle.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(&needle))
 }
 
 /// Return the portion of a chapter href after `{slug}-`, so chapter-number
@@ -645,12 +668,19 @@ pub(crate) fn chapter_href_matches_slug(href: &str, slug: &str) -> bool {
 /// and never the series slug. Returns `None` when the href doesn't match.
 pub(crate) fn chapter_url_after_slug(href: &str, slug: &str) -> Option<String> {
     let path = href
-        .split('?').next().unwrap_or(href)
-        .split('#').next().unwrap_or(href);
+        .split('?')
+        .next()
+        .unwrap_or(href)
+        .split('#')
+        .next()
+        .unwrap_or(href);
 
     let after = path.split("/chapter/").nth(1)?;
     let prefix = format!("{slug}-");
-    if !after.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(&prefix)) {
+    if !after
+        .get(..prefix.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(&prefix))
+    {
         return None;
     }
     after.get(prefix.len()..).map(str::to_string)
@@ -769,7 +799,12 @@ mod tests {
             <a href="https://mangack.com/chapter/x-chapter-1/">Chapter 1</a>
         </body></html>"#;
         let s = parse_series_page(html, "https://mangack.com/manga/x/").unwrap();
-        let ones: Vec<&str> = s.chapters.iter().filter(|c| c.number == 1.0).map(|c| c.url.as_str()).collect();
+        let ones: Vec<&str> = s
+            .chapters
+            .iter()
+            .filter(|c| c.number == 1.0)
+            .map(|c| c.url.as_str())
+            .collect();
         assert_eq!(ones.len(), 2, "{ones:?}");
         assert_eq!(s.chapters.len(), 3, "the repeated link counts once");
     }
@@ -868,7 +903,10 @@ mod tests {
     #[test]
     fn chapter_number_nav_button_returns_none() {
         // Nav buttons contain no chapter number
-        assert_eq!(extract_chapter_number("First Chapter", "/chapter/first/"), None);
+        assert_eq!(
+            extract_chapter_number("First Chapter", "/chapter/first/"),
+            None
+        );
     }
 
     // --- extract_series_slug ---
@@ -936,10 +974,7 @@ mod tests {
     #[test]
     fn url_after_slug_returns_chapter_segment() {
         assert_eq!(
-            chapter_url_after_slug(
-                "https://mangack.com/chapter/the-100-chapter-42/",
-                "the-100",
-            ),
+            chapter_url_after_slug("https://mangack.com/chapter/the-100-chapter-42/", "the-100",),
             Some("chapter-42/".to_string()),
         );
     }
@@ -949,11 +984,9 @@ mod tests {
         // Slug contains digits ("the-100"); regex on the full href could
         // mis-pick "100" as the chapter. Slicing after the slug keeps only
         // the chapter component, so number extraction sees just "chapter-7/".
-        let post = chapter_url_after_slug(
-            "https://mangack.com/chapter/the-100-chapter-7/",
-            "the-100",
-        )
-        .unwrap();
+        let post =
+            chapter_url_after_slug("https://mangack.com/chapter/the-100-chapter-7/", "the-100")
+                .unwrap();
         assert_eq!(extract_chapter_number("", &post), Some(7.0));
     }
 
@@ -974,8 +1007,14 @@ mod tests {
         assert!(!chapter_href_matches_slug("/chapter/한국-chapter-1", "x"));
         assert_eq!(chapter_url_after_slug("/chapter/한국-chapter-1", "x"), None);
         // Needle "solo-chapter-" is 13 bytes, inside the fifth Korean char.
-        assert!(!chapter_href_matches_slug("/chapter/한국어한국어-chapter-1", "solo"));
-        assert_eq!(chapter_url_after_slug("/chapter/한국어한국어-chapter-1", "solo"), None);
+        assert!(!chapter_href_matches_slug(
+            "/chapter/한국어한국어-chapter-1",
+            "solo"
+        ));
+        assert_eq!(
+            chapter_url_after_slug("/chapter/한국어한국어-chapter-1", "solo"),
+            None
+        );
     }
 
     // --- M8: lazy-loaded images, reader container scoping ---
@@ -1008,7 +1047,10 @@ mod tests {
             <img src="https://mangack.com/logo.png">
             <img src="data:image/svg+xml;base64,AAA" data-src="https://cdn.x/ch/001.jpg">
         </body></html>"#;
-        assert_eq!(parse_chapter_images(html), vec!["https://cdn.x/ch/001.jpg".to_string()]);
+        assert_eq!(
+            parse_chapter_images(html),
+            vec!["https://cdn.x/ch/001.jpg".to_string()]
+        );
     }
 
     #[test]
@@ -1019,7 +1061,10 @@ mod tests {
         </div></div></body></html>"#;
         let r = parse_search_results(html);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].cover_url.as_deref(), Some("https://mangack.com/wp-content/uploads/cover.jpg"));
+        assert_eq!(
+            r[0].cover_url.as_deref(),
+            Some("https://mangack.com/wp-content/uploads/cover.jpg")
+        );
     }
 
     #[test]
@@ -1028,7 +1073,10 @@ mod tests {
             <img src="data:image/svg+xml;base64,AAA" data-src="https://mangack.com/wp-content/uploads/cover.jpg">
         </body></html>"#;
         let s = parse_series_page(html, "https://mangack.com/manga/solo-leveling/").unwrap();
-        assert_eq!(s.cover_url.as_deref(), Some("https://mangack.com/wp-content/uploads/cover.jpg"));
+        assert_eq!(
+            s.cover_url.as_deref(),
+            Some("https://mangack.com/wp-content/uploads/cover.jpg")
+        );
     }
 
     #[test]
@@ -1038,7 +1086,11 @@ mod tests {
             <a href="https://mangack.com/chapter/the-beginning-after-the-end-chapter-1/">Chapter 1</a>
             <a href="https://mangack.com/chapter/the-beginning-after-the-end-side-story-x-chapter-9/">Chapter 9</a>
         </body></html>"#;
-        let s = parse_series_page(html, "https://mangack.com/manga/the-beginning-after-the-end-2024/").unwrap();
+        let s = parse_series_page(
+            html,
+            "https://mangack.com/manga/the-beginning-after-the-end-2024/",
+        )
+        .unwrap();
         let nums: Vec<f64> = s.chapters.iter().map(|c| c.number).collect();
         assert_eq!(nums, [1.0, 2.0], "side story stays out");
 
@@ -1048,7 +1100,10 @@ mod tests {
             <a href="https://mangack.com/chapter/solo-leveling-2-chapter-3/">Chapter 3</a>
         </body></html>"#;
         let s = parse_series_page(html, "https://mangack.com/manga/solo-leveling-2/").unwrap();
-        assert_eq!(s.chapters.iter().map(|c| c.number).collect::<Vec<_>>(), [3.0]);
+        assert_eq!(
+            s.chapters.iter().map(|c| c.number).collect::<Vec<_>>(),
+            [3.0]
+        );
         assert_eq!(strip_numeric_suffix("name-2024"), Some("name"));
         assert_eq!(strip_numeric_suffix("name"), None);
         assert_eq!(strip_numeric_suffix("name-v2"), None);

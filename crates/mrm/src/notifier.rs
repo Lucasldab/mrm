@@ -51,37 +51,45 @@ pub fn send_grouped(titles: &[String]) {
 /// or when no `[notifications.ntfy]` block is configured. Errors are logged
 /// to stderr but never propagated.
 #[cfg(feature = "ntfy")]
-pub async fn send_grouped_remote(notifications: &NotificationsConfig, titles: &[String], ids: &[i64]) {
+pub async fn send_grouped_remote(
+    notifications: &NotificationsConfig,
+    titles: &[String],
+    ids: &[i64],
+) {
     if titles.is_empty() {
         return;
     }
-    let Some(ntfy_cfg) = notifications.ntfy.as_ref() else { return };
+    let Some(ntfy_cfg) = notifications.ntfy.as_ref() else {
+        return;
+    };
 
     let (summary, body) = build_summary_body(titles);
     crate::ntfy::dispatch(ntfy_cfg, &summary, &body, click_url(ids).as_deref()).await;
 }
 
 #[cfg(not(feature = "ntfy"))]
-pub async fn send_grouped_remote(_notifications: &NotificationsConfig, _titles: &[String], _ids: &[i64]) {}
+pub async fn send_grouped_remote(
+    _notifications: &NotificationsConfig,
+    _titles: &[String],
+    _ids: &[i64],
+) {
+}
 
 /// ntfy `Click` target for the claimed series: one → its mrm-phone page,
 /// several → the library, none → no click action.
 #[cfg_attr(not(feature = "ntfy"), allow(dead_code))]
 pub(crate) fn click_url(ids: &[i64]) -> Option<String> {
     match ids {
-        []   => None,
+        [] => None,
         [id] => Some(format!("mrmphone://series/{id}")),
-        _    => Some("mrmphone://library".to_string()),
+        _ => Some("mrmphone://library".to_string()),
     }
 }
 
 /// Build the (summary, body) pair shared by every notification backend.
 pub(crate) fn build_summary_body(titles: &[String]) -> (String, String) {
     if titles.len() == 1 {
-        return (
-            "New chapters available".to_string(),
-            titles[0].clone(),
-        );
+        return ("New chapters available".to_string(), titles[0].clone());
     }
 
     let shown = titles.len().min(8);
@@ -138,7 +146,11 @@ mod tests {
     }
 
     fn notif(ntfy: Option<crate::config::NtfyConfig>) -> NotificationsConfig {
-        NotificationsConfig { enabled: true, poll_interval_minutes: 30, ntfy }
+        NotificationsConfig {
+            enabled: true,
+            poll_interval_minutes: 30,
+            ntfy,
+        }
     }
 
     #[cfg(feature = "ntfy")]
@@ -161,9 +173,9 @@ mod tests {
     #[test]
     fn can_push_false_when_feature_off() {
         // Struct literal impossible without the feature's field use; parse instead.
-        let n: NotificationsConfig = toml::from_str(
-            "enabled = true\npoll_interval_minutes = 30\n[ntfy]\ntopic = \"t\"\n",
-        ).unwrap();
+        let n: NotificationsConfig =
+            toml::from_str("enabled = true\npoll_interval_minutes = 30\n[ntfy]\ntopic = \"t\"\n")
+                .unwrap();
         assert!(n.ntfy.is_some());
         assert!(!can_push(&n));
     }

@@ -19,15 +19,22 @@ pub struct DiskCache {
 }
 
 struct Inner {
-    root:       PathBuf,
-    cap:        Option<u64>,
+    root: PathBuf,
+    cap: Option<u64>,
     last_sweep: Mutex<Option<Instant>>,
-    tmp_seq:    AtomicU64,
+    tmp_seq: AtomicU64,
 }
 
 impl DiskCache {
     pub fn new(root: PathBuf, cap: Option<u64>) -> Self {
-        Self { inner: Arc::new(Inner { root, cap, last_sweep: Mutex::new(None), tmp_seq: AtomicU64::new(0) }) }
+        Self {
+            inner: Arc::new(Inner {
+                root,
+                cap,
+                last_sweep: Mutex::new(None),
+                tmp_seq: AtomicU64::new(0),
+            }),
+        }
     }
 
     /// `root/<k0>/<k1>/…`, built from integers only.
@@ -46,7 +53,9 @@ impl DiskCache {
             let bytes = std::fs::read(&path).ok()?;
             touch(&path);
             Some(Bytes::from(bytes))
-        }).await.ok()?
+        })
+        .await
+        .ok()?
     }
 
     /// Store bytes (atomically: temp file + rename), then sweep if due.
@@ -59,7 +68,8 @@ impl DiskCache {
                 eprintln!("mrm serve: cache write {} failed: {e}", path.display());
             }
             this.maybe_sweep();
-        }).await;
+        })
+        .await;
     }
 
     pub async fn remove(&self, key: &[i64]) {
@@ -72,7 +82,9 @@ impl DiskCache {
         let seq = self.inner.tmp_seq.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!(".tmp-{}-{seq}", std::process::id()));
         std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path).inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })
+        std::fs::rename(&tmp, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     fn maybe_sweep(&self) {
@@ -80,7 +92,11 @@ impl DiskCache {
             return;
         }
         {
-            let mut last = self.inner.last_sweep.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = self
+                .inner
+                .last_sweep
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|t| t.elapsed() < SWEEP_EVERY) {
                 return;
             }
@@ -116,7 +132,9 @@ impl DiskCache {
 
 /// (mtime, size, path) of every file under `dir`, at most `depth` levels down.
 fn collect_files(dir: &Path, depth: u32, out: &mut Vec<(SystemTime, u64, PathBuf)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
@@ -124,7 +142,11 @@ fn collect_files(dir: &Path, depth: u32, out: &mut Vec<(SystemTime, u64, PathBuf
                 collect_files(&entry.path(), depth - 1, out);
             }
         } else if meta.is_file() {
-            out.push((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len(), entry.path()));
+            out.push((
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                meta.len(),
+                entry.path(),
+            ));
         }
     }
 }
@@ -141,7 +163,8 @@ mod tests {
 
     fn age(path: &Path, secs_ago: u64) {
         let f = std::fs::File::options().write(true).open(path).unwrap();
-        f.set_modified(SystemTime::now() - Duration::from_secs(secs_ago)).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(secs_ago))
+            .unwrap();
     }
 
     #[tokio::test]
@@ -153,8 +176,10 @@ mod tests {
         c.put(&[12, 3], Bytes::from_static(b"abc")).await;
         assert_eq!(c.get(&[12, 3]).await.as_deref(), Some(&b"abc"[..]));
         assert!(c.get(&[12, 4]).await.is_none());
-        let names: Vec<_> = std::fs::read_dir(dir.path().join("p/12")).unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("p/12"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
         assert_eq!(names, vec!["3"], "no temp files left behind");
         c.remove(&[12, 3]).await;
         assert!(c.get(&[12, 3]).await.is_none());

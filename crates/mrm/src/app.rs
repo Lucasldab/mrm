@@ -6,16 +6,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use sqlx::postgres::PgPool;
-use tempfile::TempDir;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use crate::cover_cache::CoverCache;
+use crate::db;
 use crate::scraper::{search_registry, source_unavailable, Registry, SearchResult, SeriesData};
 use crate::types::{AppEvent, Chapter, Discovery, Manhwa, Screen, SortMode, Status};
-use crate::db;
 
 /// Stable cache id for a search result, derived from its source_url so the
 /// same series hits the on-disk cache across queries.
@@ -69,9 +69,9 @@ impl Drop for ManagedChild {
 
 #[derive(Clone)]
 pub(crate) struct HostFullscreen {
-    address:          String,
-    internal:         i64,
-    client:           i64,
+    address: String,
+    internal: i64,
+    client: i64,
 }
 
 fn snapshot_host_fullscreen() -> Option<HostFullscreen> {
@@ -80,14 +80,26 @@ fn snapshot_host_fullscreen() -> Option<HostFullscreen> {
     }
     let out = std::process::Command::new("hyprctl")
         .args(["activewindow", "-j"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let address = v.get("address")?.as_str()?.to_string();
     let internal = v.get("fullscreen").and_then(|x| x.as_i64()).unwrap_or(0);
-    let client   = v.get("fullscreenClient").and_then(|x| x.as_i64()).unwrap_or(0);
-    if internal == 0 && client == 0 { return None; }
-    Some(HostFullscreen { address, internal, client })
+    let client = v
+        .get("fullscreenClient")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    if internal == 0 && client == 0 {
+        return None;
+    }
+    Some(HostFullscreen {
+        address,
+        internal,
+        client,
+    })
 }
 
 fn restore_host_fullscreen(h: &HostFullscreen) {
@@ -109,79 +121,79 @@ fn restore_host_fullscreen(h: &HostFullscreen) {
 // ---------------------------------------------------------------------------
 
 pub struct App {
-    pub pool:          PgPool,
-    pub screen:        Screen,
-    pub should_quit:   bool,
+    pub pool: PgPool,
+    pub screen: Screen,
+    pub should_quit: bool,
 
     // Library
-    pub manhwa_list:   Vec<Manhwa>,
-    pub library_sel:   usize,
-    pub search_query:  String,
+    pub manhwa_list: Vec<Manhwa>,
+    pub library_sel: usize,
+    pub search_query: String,
     pub search_active: bool,
-    pub sort_mode:     SortMode,
+    pub sort_mode: SortMode,
 
     // Detail
     pub current_manhwa: Option<Manhwa>,
-    pub chapter_list:   Vec<Chapter>,
-    pub chapter_sel:    usize,
+    pub chapter_list: Vec<Chapter>,
+    pub chapter_sel: usize,
 
     // Status picker
     pub status_sel: usize,
 
     // Reader
     pub current_chapter: Option<Chapter>,
-    pub images_loading:  bool,
-    pub image_paths:     Vec<std::path::PathBuf>,
-    pub image_rx:            Option<mpsc::Receiver<Option<(usize, Option<std::path::PathBuf>)>>>,
-    pub image_pending:       Vec<(usize, Option<std::path::PathBuf>)>,
+    pub images_loading: bool,
+    pub image_paths: Vec<std::path::PathBuf>,
+    pub image_rx: Option<mpsc::Receiver<Option<(usize, Option<std::path::PathBuf>)>>>,
+    pub image_pending: Vec<(usize, Option<std::path::PathBuf>)>,
     pub next_expected_image: usize,
-    pub viewer_process:      Option<ManagedChild>,
-    pub viewer_pid:          Option<u32>,
-    pub viewer_socket:       Option<String>,
+    pub viewer_process: Option<ManagedChild>,
+    pub viewer_pid: Option<u32>,
+    pub viewer_socket: Option<String>,
     pub viewer_loaded_count: usize,
-    pub viewer_drop_warned:  bool,
+    pub viewer_drop_warned: bool,
     /// imv config dir (private tempdir), alive for the viewer session.
-    pub imv_config_dir:      Option<TempDir>,
+    pub imv_config_dir: Option<TempDir>,
     /// rv's socket path, delivered by its stdout-draining thread.
-    rv_socket_rx:            Option<std::sync::mpsc::Receiver<String>>,
+    rv_socket_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Queue to the worker that runs imv-msg/rv-msg off the UI task.
-    viewer_send_tx:          Option<mpsc::UnboundedSender<Vec<String>>>,
+    viewer_send_tx: Option<mpsc::UnboundedSender<Vec<String>>>,
     /// Failures reported by that worker.
-    viewer_send_err_rx:      Option<mpsc::UnboundedReceiver<String>>,
+    viewer_send_err_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub(crate) host_fullscreen: Option<HostFullscreen>,
-    pub session_dir:     Option<TempDir>,
-    pub error_rx:        Option<mpsc::Receiver<String>>,
+    pub session_dir: Option<TempDir>,
+    pub error_rx: Option<mpsc::Receiver<String>>,
     /// Cancels the running `fetch_chapter_images` task (drops its downloads).
-    fetch_cancel:        Option<tokio_util::sync::CancellationToken>,
+    fetch_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Spawning the viewer failed for this chapter; do not retry every tick.
     viewer_launch_failed: bool,
     /// A viewer was successfully launched for the current chapter.
-    viewer_launched:     bool,
+    viewer_launched: bool,
     /// The viewer child exited on its own; the Reader screen should close.
-    viewer_exited:       bool,
+    viewer_exited: bool,
     /// The fetch task reported completion (all pages resolved).
-    loading_finished:    bool,
-    pages_ok:            usize,
-    pages_failed:        usize,
+    loading_finished: bool,
+    pages_ok: usize,
+    pages_failed: usize,
 
     pub status_msg: Option<String>,
     /// When `status_msg` was last set; expiry is measured from here.
     status_msg_at: Option<Instant>,
 
     // AddSearch screen state
-    pub add_search_query:        String,
-    pub add_search_results:      Vec<crate::scraper::SearchResult>,
-    pub add_search_grid_cols:    usize,
-    pub search_cover_cache:      CoverCache,
-    pub search_cover_protocols:  HashMap<i64, StatefulProtocol>,
-    pub add_search_sel:          usize,
-    pub add_search_loading:      bool,
-    pub add_search_error:        Option<String>,
-    pub add_search_input_active: bool,  // true = typing mode, false = browsing results
+    pub add_search_query: String,
+    pub add_search_results: Vec<crate::scraper::SearchResult>,
+    pub add_search_grid_cols: usize,
+    pub search_cover_cache: CoverCache,
+    pub search_cover_protocols: HashMap<i64, StatefulProtocol>,
+    pub add_search_sel: usize,
+    pub add_search_loading: bool,
+    pub add_search_error: Option<String>,
+    pub add_search_input_active: bool, // true = typing mode, false = browsing results
     /// Identifies the in-flight search so cancelled/stale results are dropped.
-    pub search_job:              SearchJob,
+    pub search_job: SearchJob,
     /// The spawned search task, aborted on Esc.
-    search_task:                 Option<JoinHandle<()>>,
+    search_task: Option<JoinHandle<()>>,
 
     /// Manhwa id whose Detail refresh (`R`) is in flight.
     pub refreshing: Option<i64>,
@@ -195,7 +207,7 @@ pub struct App {
     app_tx: mpsc::UnboundedSender<AppEvent>,
 
     // Delete confirmation
-    pub confirm_delete_id: Option<i64>,  // Some(id) = waiting for confirmation keypress
+    pub confirm_delete_id: Option<i64>, // Some(id) = waiting for confirmation keypress
 
     // Cover cache and image rendering
     pub cover_cache: CoverCache,
@@ -206,13 +218,13 @@ pub struct App {
     // Discover screen state — undismissed candidates found by the coordinator's
     // daily latest-chapters pass. Covers go in a separate cache so their ids
     // can't collide with library manhwa ids on disk.
-    pub discoveries:        Vec<Discovery>,
-    pub discover_sel:       usize,
+    pub discoveries: Vec<Discovery>,
+    pub discover_sel: usize,
     pub discover_grid_cols: usize,
-    pub discover_cover_cache:     CoverCache,
+    pub discover_cover_cache: CoverCache,
     pub discover_cover_protocols: HashMap<i64, StatefulProtocol>,
-    pub discover_adding:    bool,
-    pub discover_error:     Option<String>,
+    pub discover_adding: bool,
+    pub discover_error: Option<String>,
 
     // Grid layout (computed during render, used for navigation)
     pub grid_cols: usize,
@@ -244,77 +256,77 @@ impl App {
 
         Ok(Self {
             pool,
-            screen:           Screen::Library,
-            should_quit:      false,
+            screen: Screen::Library,
+            should_quit: false,
             manhwa_list,
-            library_sel:      0,
-            search_query:     String::new(),
-            search_active:    false,
-            sort_mode:        SortMode::Title,
-            current_manhwa:   None,
-            chapter_list:     Vec::new(),
-            chapter_sel:      0,
-            status_sel:       0,
-            current_chapter:  None,
-            images_loading:   false,
-            image_paths:         Vec::new(),
-            image_rx:            None,
-            image_pending:       Vec::new(),
+            library_sel: 0,
+            search_query: String::new(),
+            search_active: false,
+            sort_mode: SortMode::Title,
+            current_manhwa: None,
+            chapter_list: Vec::new(),
+            chapter_sel: 0,
+            status_sel: 0,
+            current_chapter: None,
+            images_loading: false,
+            image_paths: Vec::new(),
+            image_rx: None,
+            image_pending: Vec::new(),
             next_expected_image: 0,
-            viewer_process:      None,
-            viewer_pid:          None,
-            viewer_socket:       None,
+            viewer_process: None,
+            viewer_pid: None,
+            viewer_socket: None,
             viewer_loaded_count: 0,
-            viewer_drop_warned:  false,
-            imv_config_dir:      None,
-            rv_socket_rx:        None,
-            viewer_send_tx:      None,
-            viewer_send_err_rx:  None,
-            host_fullscreen:     None,
-            session_dir:      None,
-            error_rx:         None,
-            fetch_cancel:     None,
+            viewer_drop_warned: false,
+            imv_config_dir: None,
+            rv_socket_rx: None,
+            viewer_send_tx: None,
+            viewer_send_err_rx: None,
+            host_fullscreen: None,
+            session_dir: None,
+            error_rx: None,
+            fetch_cancel: None,
             viewer_launch_failed: false,
-            viewer_launched:  false,
-            viewer_exited:    false,
+            viewer_launched: false,
+            viewer_exited: false,
             loading_finished: false,
-            pages_ok:         0,
-            pages_failed:     0,
-            status_msg:       None,
-            status_msg_at:    None,
-            add_search_query:        String::new(),
-            add_search_results:      Vec::new(),
-            add_search_grid_cols:    1,
-            search_cover_cache:      CoverCache::with_subdir(Some("search")),
-            search_cover_protocols:  HashMap::new(),
-            add_search_sel:          0,
-            add_search_loading:      false,
-            add_search_error:        None,
+            pages_ok: 0,
+            pages_failed: 0,
+            status_msg: None,
+            status_msg_at: None,
+            add_search_query: String::new(),
+            add_search_results: Vec::new(),
+            add_search_grid_cols: 1,
+            search_cover_cache: CoverCache::with_subdir(Some("search")),
+            search_cover_protocols: HashMap::new(),
+            add_search_sel: 0,
+            add_search_loading: false,
+            add_search_error: None,
             add_search_input_active: true,
-            search_job:              SearchJob::default(),
-            search_task:             None,
-            refreshing:              None,
+            search_job: SearchJob::default(),
+            search_task: None,
+            refreshing: None,
             registry,
-            poll_now:                Arc::new(Notify::new()),
+            poll_now: Arc::new(Notify::new()),
             app_tx,
-            confirm_delete_id:       None,
-            cover_cache:             CoverCache::new(),
+            confirm_delete_id: None,
+            cover_cache: CoverCache::new(),
             picker,
-            cover_protocols:         HashMap::new(),
-            cover_tick:              0,
-            discoveries:             Vec::new(),
-            discover_sel:            0,
-            discover_grid_cols:      1,
-            discover_cover_cache:    CoverCache::with_subdir(Some("discover")),
+            cover_protocols: HashMap::new(),
+            cover_tick: 0,
+            discoveries: Vec::new(),
+            discover_sel: 0,
+            discover_grid_cols: 1,
+            discover_cover_cache: CoverCache::with_subdir(Some("discover")),
             discover_cover_protocols: HashMap::new(),
-            discover_adding:         false,
-            discover_error:          None,
-            grid_cols:               1,
-            keys:                    config.keys.clone(),
-            theme:                   config.theme.clone(),
-            imv_config:              config.imv.clone(),
-            rv_config:               config.rv.clone(),
-            viewer_kind:             config.viewer_kind(),
+            discover_adding: false,
+            discover_error: None,
+            grid_cols: 1,
+            keys: config.keys.clone(),
+            theme: config.theme.clone(),
+            imv_config: config.imv.clone(),
+            rv_config: config.rv.clone(),
+            viewer_kind: config.viewer_kind(),
             config,
             pending_g: false,
             show_help: false,
@@ -330,14 +342,19 @@ impl App {
             self.manhwa_list.iter().collect()
         } else {
             let q = self.search_query.to_lowercase();
-            self.manhwa_list.iter()
+            self.manhwa_list
+                .iter()
                 .filter(|m| m.title.to_lowercase().contains(&q))
                 .collect()
         };
 
         match self.sort_mode {
-            SortMode::Title => list.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
-            SortMode::Unread => list.sort_by(|a, b| b.unread.cmp(&a.unread).then(a.title.cmp(&b.title))),
+            SortMode::Title => {
+                list.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            }
+            SortMode::Unread => {
+                list.sort_by(|a, b| b.unread.cmp(&a.unread).then(a.title.cmp(&b.title)))
+            }
             SortMode::Status => list.sort_by(|a, b| {
                 let sa = a.status.sort_rank();
                 let sb = b.status.sort_rank();
@@ -376,13 +393,22 @@ impl App {
     pub async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Key(key) => self.handle_key(key).await?,
-            AppEvent::Tick     => {
+            AppEvent::Tick => {
                 self.poll_images();
                 if self.viewer_exited {
                     self.viewer_exited = false;
-                    if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
+                    if let Screen::Reader {
+                        manhwa_id,
+                        chapter_id,
+                    } = self.screen
+                    {
                         // Viewer closed on its own: save progress, back to Detail.
-                        self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::ViewerClosed).await;
+                        self.save_reader_progress_nonfatal(
+                            chapter_id,
+                            manhwa_id,
+                            ReaderExit::ViewerClosed,
+                        )
+                        .await;
                         self.kill_viewer();
                         self.open_detail(manhwa_id).await?;
                     } else {
@@ -410,9 +436,12 @@ impl App {
                     // Same sweep for Discover covers.
                     if !self.discoveries.is_empty() {
                         self.discover_cover_cache.reload_from_disk_ids(
-                            self.discoveries.iter().map(|d| (d.id, d.cover_url.as_deref())),
+                            self.discoveries
+                                .iter()
+                                .map(|d| (d.id, d.cover_url.as_deref())),
                         );
-                        let stale: Vec<i64> = self.discover_cover_protocols.keys().copied().collect();
+                        let stale: Vec<i64> =
+                            self.discover_cover_protocols.keys().copied().collect();
                         for id in stale {
                             if self.discover_cover_cache.get(id).is_none() {
                                 self.discover_cover_protocols.remove(&id);
@@ -422,9 +451,9 @@ impl App {
                     // Same sweep for Search covers.
                     if !self.add_search_results.is_empty() {
                         self.search_cover_cache.reload_from_disk_ids(
-                            self.add_search_results.iter().map(|r| {
-                                (search_result_id(&r.source_url), r.cover_url.as_deref())
-                            }),
+                            self.add_search_results
+                                .iter()
+                                .map(|r| (search_result_id(&r.source_url), r.cover_url.as_deref())),
                         );
                         let stale: Vec<i64> = self.search_cover_protocols.keys().copied().collect();
                         for id in stale {
@@ -440,15 +469,24 @@ impl App {
                 self.cover_cache.reload_from_disk(&self.manhwa_list);
             }
             AppEvent::ScraperMsg(ev) => self.handle_scraper_event(ev).await?,
-            AppEvent::SearchDone { seq, results, errors } => {
+            AppEvent::SearchDone {
+                seq,
+                results,
+                errors,
+            } => {
                 self.on_search_done(seq, results, errors);
             }
             AppEvent::AddDone { source, result } => self.on_add_done(source, result).await?,
             AppEvent::RefreshDone { manhwa_id, result } => {
                 self.on_refresh_done(manhwa_id, result).await?;
             }
-            AppEvent::DiscoveryAddDone { discovery_id, source, result } => {
-                self.on_discovery_add_done(discovery_id, source, result).await?;
+            AppEvent::DiscoveryAddDone {
+                discovery_id,
+                source,
+                result,
+            } => {
+                self.on_discovery_add_done(discovery_id, source, result)
+                    .await?;
             }
         }
         Ok(())
@@ -477,9 +515,7 @@ impl App {
                 // Refresh so the Discover screen shows them immediately if
                 // the user has it open, and surface a banner either way.
                 self.refresh_discoveries().await?;
-                self.set_msg(format!(
-                    "{count} new manhwa discovered — press D to browse"
-                ));
+                self.set_msg(format!("{count} new manhwa discovered — press D to browse"));
             }
         }
         Ok(())
@@ -506,18 +542,18 @@ impl App {
             return Ok(());
         }
 
-        if key.code == KeyCode::Char('q')
-            && !self.search_active
-            && self.screen == Screen::Library
-        {
+        if key.code == KeyCode::Char('q') && !self.search_active && self.screen == Screen::Library {
             self.should_quit = true;
             return Ok(());
         }
-        if key.code == KeyCode::Char('c')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            if let Screen::Reader { manhwa_id, chapter_id } = self.screen {
-                self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Quit).await;
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Screen::Reader {
+                manhwa_id,
+                chapter_id,
+            } = self.screen
+            {
+                self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Quit)
+                    .await;
                 self.kill_viewer();
             }
             self.should_quit = true;
@@ -530,8 +566,10 @@ impl App {
             if key.code == KeyCode::Char('g') {
                 let top_key = KeyEvent::new(self.keys.top(), KeyModifiers::NONE);
                 match self.screen.clone() {
-                    Screen::Library                           => self.handle_library_key(top_key).await?,
-                    Screen::Detail { manhwa_id }              => self.handle_detail_key(top_key, manhwa_id).await?,
+                    Screen::Library => self.handle_library_key(top_key).await?,
+                    Screen::Detail { manhwa_id } => {
+                        self.handle_detail_key(top_key, manhwa_id).await?
+                    }
                     _ => {}
                 }
                 return Ok(());
@@ -548,12 +586,17 @@ impl App {
         }
 
         match self.screen.clone() {
-            Screen::Library                           => self.handle_library_key(key).await?,
-            Screen::Detail { manhwa_id }              => self.handle_detail_key(key, manhwa_id).await?,
-            Screen::Reader { manhwa_id, chapter_id }  => self.handle_reader_key(key, manhwa_id, chapter_id).await?,
-            Screen::StatusPicker { manhwa_id }        => self.handle_status_picker_key(key, manhwa_id).await?,
-            Screen::Search                            => self.handle_search_key(key).await?,
-            Screen::Discover                          => self.handle_discover_key(key).await?,
+            Screen::Library => self.handle_library_key(key).await?,
+            Screen::Detail { manhwa_id } => self.handle_detail_key(key, manhwa_id).await?,
+            Screen::Reader {
+                manhwa_id,
+                chapter_id,
+            } => self.handle_reader_key(key, manhwa_id, chapter_id).await?,
+            Screen::StatusPicker { manhwa_id } => {
+                self.handle_status_picker_key(key, manhwa_id).await?
+            }
+            Screen::Search => self.handle_search_key(key).await?,
+            Screen::Discover => self.handle_discover_key(key).await?,
         }
         Ok(())
     }
@@ -567,7 +610,11 @@ impl App {
         // Ids may be reused — drop the cached cover file and any
         // in-memory entry so a future series that lands on this id doesn't
         // inherit stale artwork.
-        let _ = std::fs::remove_file(self.cover_cache.cache_dir().join(format!("{manhwa_id}.jpg")));
+        let _ = std::fs::remove_file(
+            self.cover_cache
+                .cache_dir()
+                .join(format!("{manhwa_id}.jpg")),
+        );
         self.cover_cache.invalidate(manhwa_id);
         self.cover_protocols.remove(&manhwa_id);
         self.reload_manhwa().await?;
@@ -597,13 +644,15 @@ impl App {
 
         if self.search_active {
             match k {
-                KeyCode::Esc | KeyCode::Enter => { self.search_active = false; }
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.search_active = false;
+                }
                 KeyCode::Backspace => {
                     let prev = self.selected_manhwa_id();
                     self.search_query.pop();
                     self.restore_library_selection(prev);
                 }
-                KeyCode::Char(c)   => {
+                KeyCode::Char(c) => {
                     let prev = self.selected_manhwa_id();
                     self.search_query.push(c);
                     self.restore_library_selection(prev);
@@ -622,7 +671,9 @@ impl App {
         } else if k == self.keys.up() || k == KeyCode::Up {
             self.library_sel = self.library_sel.saturating_sub(cols);
         } else if k == self.keys.right() || k == KeyCode::Right {
-            if count > 0 { self.library_sel = (self.library_sel + 1).min(count - 1); }
+            if count > 0 {
+                self.library_sel = (self.library_sel + 1).min(count - 1);
+            }
         } else if k == self.keys.left() || k == KeyCode::Left {
             self.library_sel = self.library_sel.saturating_sub(1);
         } else if k == self.keys.top() {
@@ -683,7 +734,9 @@ impl App {
             self.current_manhwa = None;
         } else if k == self.keys.down() || k == KeyCode::Down {
             let len = self.chapter_list.len();
-            if len > 0 { self.chapter_sel = (self.chapter_sel + 1).min(len - 1); }
+            if len > 0 {
+                self.chapter_sel = (self.chapter_sel + 1).min(len - 1);
+            }
         } else if k == self.keys.up() || k == KeyCode::Up {
             self.chapter_sel = self.chapter_sel.saturating_sub(1);
         } else if k == self.keys.top() {
@@ -691,7 +744,9 @@ impl App {
         } else if k == self.keys.bottom() {
             self.chapter_sel = self.chapter_list.len().saturating_sub(1);
         } else if k == self.keys.set_status() {
-            let current_idx = self.current_manhwa.as_ref()
+            let current_idx = self
+                .current_manhwa
+                .as_ref()
                 .and_then(|m| Status::all().iter().position(|s| s == &m.status))
                 .unwrap_or(0);
             self.status_sel = current_idx;
@@ -746,15 +801,16 @@ impl App {
         }
         let (source, source_url) = match self.current_manhwa.as_ref() {
             Some(m) => (m.source.clone(), m.source_url.clone()),
-            None    => return,
+            None => return,
         };
         if !self.registry.contains_key(source.as_str()) {
             self.set_msg(source_unavailable(&source));
             return;
         }
         self.refreshing = Some(manhwa_id);
-        self.spawn_series_fetch(source, source_url, move |result| {
-            AppEvent::RefreshDone { manhwa_id, result }
+        self.spawn_series_fetch(source, source_url, move |result| AppEvent::RefreshDone {
+            manhwa_id,
+            result,
         });
     }
 
@@ -769,11 +825,14 @@ impl App {
             self.refreshing = None;
         }
         let series = match result {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 // A failed refresh is a failed poll for the health marker. The
                 // failure message wins over any error refreshing the views.
-                if db::record_poll_failure(&self.pool, manhwa_id, &e).await.is_ok() {
+                if db::record_poll_failure(&self.pool, manhwa_id, &e)
+                    .await
+                    .is_ok()
+                {
                     if self.screen == (Screen::Detail { manhwa_id }) {
                         let _ = self.refresh_detail(manhwa_id).await;
                     }
@@ -786,14 +845,20 @@ impl App {
         // Fresh pub_status from the DB: a poll may have changed it meanwhile,
         // and the series may have been deleted.
         let old_pub_status = match db::fetch_manhwa(&self.pool, manhwa_id).await {
-            Ok(m)  => m.pub_status,
-            Err(e) if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) => {
+            Ok(m) => m.pub_status,
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<sqlx::Error>(),
+                    Some(sqlx::Error::RowNotFound)
+                ) =>
+            {
                 self.set_msg("Refresh skipped: series no longer in library");
                 return Ok(());
             }
             Err(e) => return Err(e),
         };
-        let new_chapters = db::apply_poll_result(&self.pool, manhwa_id, &series, &old_pub_status).await?;
+        let new_chapters =
+            db::apply_poll_result(&self.pool, manhwa_id, &series, &old_pub_status).await?;
         db::update_manhwa_metadata(&self.pool, manhwa_id, &series).await?;
         if self.screen == (Screen::Detail { manhwa_id }) {
             self.refresh_detail(manhwa_id).await?;
@@ -829,8 +894,11 @@ impl App {
         let tx = self.app_tx.clone();
         tokio::spawn(async move {
             let result = match registry.get(source.as_str()) {
-                Some(scraper) => scraper.get_series(&source_url).await.map_err(|e| format!("{e:#}")),
-                None          => Err(source_unavailable(&source)),
+                Some(scraper) => scraper
+                    .get_series(&source_url)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                None => Err(source_unavailable(&source)),
             };
             let _ = tx.send(done(result));
         });
@@ -840,18 +908,26 @@ impl App {
     // Reader keys
     // -----------------------------------------------------------------------
 
-    async fn handle_reader_key(&mut self, key: KeyEvent, manhwa_id: i64, chapter_id: i64) -> Result<()> {
+    async fn handle_reader_key(
+        &mut self,
+        key: KeyEvent,
+        manhwa_id: i64,
+        chapter_id: i64,
+    ) -> Result<()> {
         let k = key.code;
         if k == KeyCode::Esc || k == self.keys.back() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Back).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::Back)
+                .await;
             self.kill_viewer();
             self.open_detail(manhwa_id).await?;
         } else if k == self.keys.next_chapter() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::NextChapter).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::NextChapter)
+                .await;
             self.kill_viewer();
             self.open_next_chapter(manhwa_id, chapter_id).await?;
         } else if k == self.keys.prev_chapter() {
-            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::PrevChapter).await;
+            self.save_reader_progress_nonfatal(chapter_id, manhwa_id, ReaderExit::PrevChapter)
+                .await;
             self.kill_viewer();
             self.open_prev_chapter(manhwa_id, chapter_id).await?;
         }
@@ -912,7 +988,7 @@ impl App {
         } else {
             // Browsing results grid
             let count = self.add_search_results.len();
-            let cols  = self.add_search_grid_cols.max(1);
+            let cols = self.add_search_grid_cols.max(1);
             if k == KeyCode::Esc || k == self.keys.back() || k == self.keys.input_mode() {
                 self.add_search_input_active = true;
             } else if k == self.keys.down() || k == KeyCode::Down {
@@ -923,7 +999,9 @@ impl App {
             } else if k == self.keys.up() || k == KeyCode::Up {
                 self.add_search_sel = self.add_search_sel.saturating_sub(cols);
             } else if k == self.keys.right() || k == KeyCode::Right {
-                if count > 0 { self.add_search_sel = (self.add_search_sel + 1).min(count - 1); }
+                if count > 0 {
+                    self.add_search_sel = (self.add_search_sel + 1).min(count - 1);
+                }
             } else if k == self.keys.left() || k == KeyCode::Left {
                 self.add_search_sel = self.add_search_sel.saturating_sub(1);
             } else if k == self.keys.top() {
@@ -942,7 +1020,9 @@ impl App {
     // -----------------------------------------------------------------------
 
     async fn handle_discover_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.discover_adding { return Ok(()); }
+        if self.discover_adding {
+            return Ok(());
+        }
         let k = key.code;
         let count = self.discoveries.len();
         let cols = self.discover_grid_cols.max(1);
@@ -958,7 +1038,9 @@ impl App {
         } else if k == self.keys.up() || k == KeyCode::Up {
             self.discover_sel = self.discover_sel.saturating_sub(cols);
         } else if k == self.keys.right() || k == KeyCode::Right {
-            if count > 0 { self.discover_sel = (self.discover_sel + 1).min(count - 1); }
+            if count > 0 {
+                self.discover_sel = (self.discover_sel + 1).min(count - 1);
+            }
         } else if k == self.keys.left() || k == KeyCode::Left {
             self.discover_sel = self.discover_sel.saturating_sub(1);
         } else if k == self.keys.top() {
@@ -988,7 +1070,7 @@ impl App {
         self.cancel_search();
         let seq = self.search_job.start();
         self.add_search_loading = true;
-        self.add_search_error   = None;
+        self.add_search_error = None;
         self.add_search_results.clear();
         self.search_cover_protocols.clear();
 
@@ -996,7 +1078,11 @@ impl App {
         let tx = self.app_tx.clone();
         self.search_task = Some(tokio::spawn(async move {
             let (results, errors) = search_registry(&registry, &query).await;
-            let _ = tx.send(AppEvent::SearchDone { seq, results, errors });
+            let _ = tx.send(AppEvent::SearchDone {
+                seq,
+                results,
+                errors,
+            });
         }));
     }
 
@@ -1017,15 +1103,21 @@ impl App {
             return; // cancelled or superseded
         }
         self.search_task = None;
-        self.add_search_error = if errors.is_empty() { None } else { Some(errors.join("  ")) };
+        self.add_search_error = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("  "))
+        };
         self.add_search_results = results;
-        self.add_search_sel     = 0;
+        self.add_search_sel = 0;
         self.add_search_loading = false;
-        self.add_search_input_active = false;  // move focus to results grid
+        self.add_search_input_active = false; // move focus to results grid
         self.search_cover_protocols.clear();
 
         // Kick off cover preload for all results so the grid fills in covers.
-        let preload: Vec<(i64, Option<String>)> = self.add_search_results.iter()
+        let preload: Vec<(i64, Option<String>)> = self
+            .add_search_results
+            .iter()
             .map(|r| (search_result_id(&r.source_url), r.cover_url.clone()))
             .collect();
         if !preload.is_empty() {
@@ -1041,7 +1133,7 @@ impl App {
     pub fn do_add_manhwa(&mut self) {
         let result = match self.add_search_results.get(self.add_search_sel) {
             Some(r) => r.clone(),
-            None    => {
+            None => {
                 self.add_search_error = Some(
                     "No result selected. Run a search and pick a result before pressing Enter."
                         .into(),
@@ -1055,7 +1147,7 @@ impl App {
         }
 
         self.add_search_loading = true;
-        self.add_search_error   = None;
+        self.add_search_error = None;
         let source = result.source.clone();
         self.spawn_series_fetch(result.source, result.source_url, move |result| {
             AppEvent::AddDone { source, result }
@@ -1069,7 +1161,7 @@ impl App {
     ) -> Result<()> {
         self.add_search_loading = false;
         let series = match result {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 self.add_search_error = Some(format!("Fetch failed: {e}"));
                 return Ok(());
@@ -1089,9 +1181,9 @@ impl App {
                 // Reset search state and return to library (only if the user
                 // is still on the Search screen).
                 if self.screen == Screen::Search {
-                    self.add_search_query   = String::new();
+                    self.add_search_query = String::new();
                     self.add_search_results = Vec::new();
-                    self.add_search_sel     = 0;
+                    self.add_search_sel = 0;
                     self.add_search_input_active = true;
                     self.search_cover_protocols.clear();
                     self.screen = Screen::Library;
@@ -1110,41 +1202,49 @@ impl App {
 
     pub async fn open_detail(&mut self, manhwa_id: i64) -> Result<()> {
         self.current_manhwa = Some(db::fetch_manhwa(&self.pool, manhwa_id).await?);
-        self.chapter_list   = db::fetch_chapters(&self.pool, manhwa_id).await?;
-        self.chapter_sel    = self.first_unread_idx();
-        self.screen         = Screen::Detail { manhwa_id };
+        self.chapter_list = db::fetch_chapters(&self.pool, manhwa_id).await?;
+        self.chapter_sel = self.first_unread_idx();
+        self.screen = Screen::Detail { manhwa_id };
         Ok(())
     }
 
     async fn refresh_detail(&mut self, manhwa_id: i64) -> Result<()> {
         self.current_manhwa = Some(db::fetch_manhwa(&self.pool, manhwa_id).await?);
-        self.chapter_list   = db::fetch_chapters(&self.pool, manhwa_id).await?;
+        self.chapter_list = db::fetch_chapters(&self.pool, manhwa_id).await?;
         Ok(())
     }
 
     pub async fn open_reader(&mut self, manhwa_id: i64, chapter_id: i64) -> Result<()> {
         db::start_chapter(&self.pool, chapter_id).await?;
-        self.current_chapter  = self.chapter_list.iter().find(|c| c.id == chapter_id).cloned();
+        self.current_chapter = self
+            .chapter_list
+            .iter()
+            .find(|c| c.id == chapter_id)
+            .cloned();
         self.reset_reader_state();
-        self.images_loading       = true;
-        self.screen           = Screen::Reader { manhwa_id, chapter_id };
+        self.images_loading = true;
+        self.screen = Screen::Reader {
+            manhwa_id,
+            chapter_id,
+        };
 
         if let Some(ch) = &self.current_chapter {
-            let source = self.current_manhwa.as_ref()
-                .map(|m| m.source.clone()).unwrap_or_default();
+            let source = self
+                .current_manhwa
+                .as_ref()
+                .map(|m| m.source.clone())
+                .unwrap_or_default();
             let registry = self.registry.clone();
             let url = ch.url.clone();
             let (tx, rx) = mpsc::channel::<Option<(usize, Option<std::path::PathBuf>)>>(32);
             let (err_tx, err_rx) = mpsc::channel::<String>(4);
-            self.image_rx  = Some(rx);
-            self.error_rx  = Some(err_rx);
+            self.image_rx = Some(rx);
+            self.error_rx = Some(err_rx);
 
             // Create a unique session directory for this chapter's images
-            let session_dir = tempfile::Builder::new()
-                .prefix("mrm_")
-                .tempdir()
-                .ok();
-            let session_path = session_dir.as_ref()
+            let session_dir = tempfile::Builder::new().prefix("mrm_").tempdir().ok();
+            let session_path = session_dir
+                .as_ref()
                 .map(|d| d.path().to_path_buf())
                 .unwrap_or_else(std::env::temp_dir);
             self.session_dir = session_dir;
@@ -1163,9 +1263,12 @@ impl App {
     }
 
     async fn open_next_chapter(&mut self, manhwa_id: i64, chapter_id: i64) -> Result<()> {
-        let next = self.chapter_list.iter()
+        let next = self
+            .chapter_list
+            .iter()
             .skip_while(|c| c.id != chapter_id)
-            .nth(1).map(|c| c.id);
+            .nth(1)
+            .map(|c| c.id);
         if let Some(id) = next {
             self.open_reader(manhwa_id, id).await?;
         } else {
@@ -1176,7 +1279,9 @@ impl App {
     }
 
     async fn open_prev_chapter(&mut self, manhwa_id: i64, chapter_id: i64) -> Result<()> {
-        let prev = self.chapter_list.iter()
+        let prev = self
+            .chapter_list
+            .iter()
             .position(|c| c.id == chapter_id)
             .and_then(|i| i.checked_sub(1))
             .map(|i| self.chapter_list[i].id);
@@ -1197,17 +1302,19 @@ impl App {
         // If viewer was closed by the user, stop loading
         if let Some(managed) = &mut self.viewer_process {
             if let Ok(Some(_)) = managed.0.try_wait() {
-                self.viewer_process  = None;
-                self.viewer_pid      = None;
-                self.viewer_socket   = None;
-                self.rv_socket_rx    = None;
-                self.viewer_send_tx  = None;
-                self.imv_config_dir  = None;
-                self.images_loading  = false;
-                self.image_rx        = None;
-                self.error_rx        = None;
-                self.viewer_exited   = true;
-                if let Some(c) = self.fetch_cancel.take() { c.cancel(); }
+                self.viewer_process = None;
+                self.viewer_pid = None;
+                self.viewer_socket = None;
+                self.rv_socket_rx = None;
+                self.viewer_send_tx = None;
+                self.imv_config_dir = None;
+                self.images_loading = false;
+                self.image_rx = None;
+                self.error_rx = None;
+                self.viewer_exited = true;
+                if let Some(c) = self.fetch_cancel.take() {
+                    c.cancel();
+                }
                 if let Some(h) = self.host_fullscreen.take() {
                     restore_host_fullscreen(&h);
                 }
@@ -1218,7 +1325,9 @@ impl App {
         // Failures from the imv-msg/rv-msg worker.
         let mut send_errs = Vec::new();
         if let Some(rx) = &mut self.viewer_send_err_rx {
-            while let Ok(m) = rx.try_recv() { send_errs.push(m); }
+            while let Ok(m) = rx.try_recv() {
+                send_errs.push(m);
+            }
         }
         if let Some(m) = send_errs.into_iter().next() {
             if !self.viewer_drop_warned {
@@ -1229,7 +1338,9 @@ impl App {
 
         // Keep ticking after loading ends while pages still wait for the
         // viewer (e.g. rv's socket path not known yet).
-        if self.viewer_exited { return; }
+        if self.viewer_exited {
+            return;
+        }
         if !self.images_loading
             && (self.viewer_launch_failed || self.viewer_loaded_count >= self.image_paths.len())
         {
@@ -1257,7 +1368,9 @@ impl App {
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
             }
-            if gone { self.rv_socket_rx = None; }
+            if gone {
+                self.rv_socket_rx = None;
+            }
         }
 
         // Drain error channel — route errors to TUI status bar
@@ -1276,12 +1389,22 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(Some((idx, path))) => {
-                        if path.is_some() { self.pages_ok += 1; } else { self.pages_failed += 1; }
+                        if path.is_some() {
+                            self.pages_ok += 1;
+                        } else {
+                            self.pages_failed += 1;
+                        }
                         self.image_pending.push((idx, path));
                     }
-                    Ok(None) => { done = true; break; }
-                    Err(mpsc::error::TryRecvError::Empty)        => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => { done = true; break; }
+                    Ok(None) => {
+                        done = true;
+                        break;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
                 }
             }
         }
@@ -1312,12 +1435,14 @@ impl App {
             // rv pages wait (stay queued) until its socket path is known.
             let ready = match self.viewer_kind {
                 crate::config::ViewerKind::Imv => self.viewer_pid.is_some(),
-                crate::config::ViewerKind::Rv  => self.viewer_socket.is_some(),
+                crate::config::ViewerKind::Rv => self.viewer_socket.is_some(),
             };
             let total = self.image_paths.len();
             if ready && self.viewer_loaded_count < total {
                 let batch: Vec<String> = self.image_paths[self.viewer_loaded_count..total]
-                    .iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
                 self.viewer_loaded_count = total;
                 self.send_viewer_open(batch);
             }
@@ -1326,8 +1451,8 @@ impl App {
         if done {
             self.loading_finished = true;
             self.images_loading = false;
-            self.image_rx       = None;
-            self.error_rx       = None;
+            self.image_rx = None;
+            self.error_rx = None;
         }
     }
 
@@ -1338,7 +1463,7 @@ impl App {
         self.host_fullscreen = snapshot_host_fullscreen();
         match self.viewer_kind {
             ViewerKind::Imv => self.launch_imv(),
-            ViewerKind::Rv  => self.launch_rv(),
+            ViewerKind::Rv => self.launch_rv(),
         }
     }
 
@@ -1348,12 +1473,15 @@ impl App {
         // private (0700) tempdir held for the viewer session.
         let cfg_dir = match tempfile::Builder::new().prefix("mrm_imv_").tempdir() {
             Ok(d) => d,
-            Err(e) => { self.set_msg(format!("imv config dir: {e}")); return; }
+            Err(e) => {
+                self.set_msg(format!("imv config dir: {e}"));
+                return;
+            }
         };
         let imv_dir = cfg_dir.path().join("imv");
-        if let Err(e) = std::fs::create_dir(&imv_dir)
-            .and_then(|_| std::fs::write(imv_dir.join("config"), self.imv_config.to_config_string()))
-        {
+        if let Err(e) = std::fs::create_dir(&imv_dir).and_then(|_| {
+            std::fs::write(imv_dir.join("config"), self.imv_config.to_config_string())
+        }) {
             self.set_msg(format!("imv config: {e}"));
             return;
         }
@@ -1368,7 +1496,9 @@ impl App {
             return;
         }
         let log = open_viewer_log("imv.log");
-        let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
+        let stderr = log
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(std::process::Stdio::null);
         match std::process::Command::new(bin)
             .env("XDG_CONFIG_HOME", cfg_dir.path())
             .args(&args)
@@ -1378,10 +1508,10 @@ impl App {
         {
             Ok(child) => {
                 let pid = child.id();
-                self.imv_config_dir      = Some(cfg_dir);
-                self.viewer_pid          = Some(pid);
+                self.imv_config_dir = Some(cfg_dir);
+                self.viewer_pid = Some(pid);
                 self.viewer_loaded_count = self.image_paths.len();
-                self.viewer_process      = Some(ManagedChild(child));
+                self.viewer_process = Some(ManagedChild(child));
                 self.start_send_worker(pid.to_string());
             }
             Err(e) => self.set_msg(format!("{bin} error: {e}")),
@@ -1399,7 +1529,9 @@ impl App {
             return;
         }
         let log = open_viewer_log("rv.log");
-        let stderr = log.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null);
+        let stderr = log
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(std::process::Stdio::null);
         match std::process::Command::new(&bin)
             .args(&args)
             .stdout(std::process::Stdio::piped())
@@ -1417,10 +1549,10 @@ impl App {
                     self.rv_socket_rx = Some(rx);
                 }
                 let pid = child.id();
-                self.viewer_pid          = Some(pid);
-                self.viewer_socket       = None;
+                self.viewer_pid = Some(pid);
+                self.viewer_socket = None;
                 self.viewer_loaded_count = self.image_paths.len();
-                self.viewer_process      = Some(ManagedChild(child));
+                self.viewer_process = Some(ManagedChild(child));
             }
             Err(e) => self.set_msg(format!("{bin} error: {e}")),
         }
@@ -1433,11 +1565,11 @@ impl App {
         use crate::config::ViewerKind;
         let prog = match self.viewer_kind {
             ViewerKind::Imv => "imv-msg",
-            ViewerKind::Rv  => "rv-msg",
+            ViewerKind::Rv => "rv-msg",
         };
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
         let (err_tx, err_rx) = mpsc::unbounded_channel::<String>();
-        self.viewer_send_tx     = Some(tx);
+        self.viewer_send_tx = Some(tx);
         self.viewer_send_err_rx = Some(err_rx);
         tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
@@ -1473,35 +1605,37 @@ impl App {
 
     /// Clear all per-chapter reader state and cancel the page download task.
     fn reset_reader_state(&mut self) {
-        if let Some(c) = self.fetch_cancel.take() { c.cancel(); }
-        self.images_loading       = false;
-        self.image_rx             = None;
-        self.error_rx             = None;
-        self.image_paths          = Vec::new();
-        self.image_pending        = Vec::new();
-        self.next_expected_image  = 0;
-        self.viewer_process       = None;  // Drop kills viewer
-        self.viewer_pid           = None;
-        self.viewer_socket        = None;
-        self.rv_socket_rx         = None;
-        self.viewer_send_tx       = None;
-        self.viewer_send_err_rx   = None;
-        self.imv_config_dir       = None;  // Drop deletes the private config dir
-        self.viewer_loaded_count  = 0;
-        self.viewer_drop_warned   = false;
+        if let Some(c) = self.fetch_cancel.take() {
+            c.cancel();
+        }
+        self.images_loading = false;
+        self.image_rx = None;
+        self.error_rx = None;
+        self.image_paths = Vec::new();
+        self.image_pending = Vec::new();
+        self.next_expected_image = 0;
+        self.viewer_process = None; // Drop kills viewer
+        self.viewer_pid = None;
+        self.viewer_socket = None;
+        self.rv_socket_rx = None;
+        self.viewer_send_tx = None;
+        self.viewer_send_err_rx = None;
+        self.imv_config_dir = None; // Drop deletes the private config dir
+        self.viewer_loaded_count = 0;
+        self.viewer_drop_warned = false;
         self.viewer_launch_failed = false;
-        self.viewer_launched      = false;
-        self.viewer_exited        = false;
-        self.loading_finished     = false;
-        self.pages_ok             = 0;
-        self.pages_failed         = 0;
+        self.viewer_launched = false;
+        self.viewer_exited = false;
+        self.loading_finished = false;
+        self.pages_ok = 0;
+        self.pages_failed = 0;
     }
 
     /// Tear down the viewer and the chapter's download state. Call
     /// `save_reader_progress` first: this clears what it reads.
     fn kill_viewer(&mut self) {
         self.reset_reader_state();
-        self.session_dir         = None;  // Drop + TempDir deletes /tmp/mrm_*/
+        self.session_dir = None; // Drop + TempDir deletes /tmp/mrm_*/
         if let Some(h) = self.host_fullscreen.take() {
             restore_host_fullscreen(&h);
         }
@@ -1513,7 +1647,12 @@ impl App {
 
     /// Save progress; a failure becomes a status message so leaving the
     /// Reader (and the viewer teardown after it) never depends on the DB.
-    async fn save_reader_progress_nonfatal(&mut self, chapter_id: i64, manhwa_id: i64, exit: ReaderExit) {
+    async fn save_reader_progress_nonfatal(
+        &mut self,
+        chapter_id: i64,
+        manhwa_id: i64,
+        exit: ReaderExit,
+    ) {
         if let Err(e) = self.save_reader_progress(chapter_id, manhwa_id, exit).await {
             self.set_msg(format!("progress not saved: {e:#}"));
         }
@@ -1521,7 +1660,12 @@ impl App {
 
     /// Mark the chapter read only if the user finished it (`exit`) in a viewer
     /// that opened, and every page loaded.
-    async fn save_reader_progress(&mut self, chapter_id: i64, manhwa_id: i64, exit: ReaderExit) -> Result<()> {
+    async fn save_reader_progress(
+        &mut self,
+        chapter_id: i64,
+        manhwa_id: i64,
+        exit: ReaderExit,
+    ) -> Result<()> {
         if !should_mark_complete(
             self.viewer_launched && exit.finished(),
             self.loading_finished,
@@ -1544,7 +1688,10 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn first_unread_idx(&self) -> usize {
-        self.chapter_list.iter().position(|c| !c.completed).unwrap_or(0)
+        self.chapter_list
+            .iter()
+            .position(|c| !c.completed)
+            .unwrap_or(0)
     }
 
     pub fn set_msg(&mut self, msg: impl Into<String>) {
@@ -1577,7 +1724,10 @@ impl App {
     }
 
     /// Same as get_cover_protocol but for the Discover cache namespace.
-    pub fn get_discover_cover_protocol(&mut self, discover_id: i64) -> Option<&mut StatefulProtocol> {
+    pub fn get_discover_cover_protocol(
+        &mut self,
+        discover_id: i64,
+    ) -> Option<&mut StatefulProtocol> {
         if self.discover_cover_protocols.contains_key(&discover_id) {
             return self.discover_cover_protocols.get_mut(&discover_id);
         }
@@ -1630,7 +1780,7 @@ impl App {
     pub fn do_add_discovery(&mut self) {
         let discovery = match self.discoveries.get(self.discover_sel) {
             Some(d) => d.clone(),
-            None    => return,
+            None => return,
         };
         if !self.registry.contains_key(discovery.source.as_str()) {
             self.discover_error = Some(source_unavailable(&discovery.source));
@@ -1638,10 +1788,14 @@ impl App {
         }
 
         self.discover_adding = true;
-        self.discover_error  = None;
+        self.discover_error = None;
         let (discovery_id, source) = (discovery.id, discovery.source.clone());
         self.spawn_series_fetch(discovery.source, discovery.source_url, move |result| {
-            AppEvent::DiscoveryAddDone { discovery_id, source, result }
+            AppEvent::DiscoveryAddDone {
+                discovery_id,
+                source,
+                result,
+            }
         });
     }
 
@@ -1653,7 +1807,7 @@ impl App {
     ) -> Result<()> {
         self.discover_adding = false;
         let series = match result {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 self.discover_error = Some(format!("Fetch failed: {e}"));
                 return Ok(());
@@ -1683,7 +1837,7 @@ impl App {
     pub async fn do_dismiss_discovery(&mut self) -> Result<()> {
         let id = match self.discoveries.get(self.discover_sel) {
             Some(d) => d.id,
-            None    => return Ok(()),
+            None => return Ok(()),
         };
         db::dismiss_discovery(&self.pool, id).await?;
         self.discover_cover_protocols.remove(&id);
@@ -1703,7 +1857,7 @@ impl App {
 #[derive(Debug, Default)]
 pub struct SearchJob {
     last_seq: u64,
-    current:  Option<u64>,
+    current: Option<u64>,
 }
 
 impl SearchJob {
@@ -1775,7 +1929,7 @@ async fn fetch_chapter_images(
     }
 
     let client = match crate::scraper::image_client(source) {
-        Ok(c)  => Arc::new(c),
+        Ok(c) => Arc::new(c),
         Err(e) => {
             let _ = err_tx.send(format!("Could not load chapter: {e}")).await;
             let _ = tx.send(None).await;
@@ -1792,20 +1946,23 @@ async fn fetch_chapter_images(
         std::collections::HashMap::new();
 
     for (page, url) in urls.into_iter().enumerate() {
-        let client      = client.clone();
-        let sem         = sem.clone();
+        let client = client.clone();
+        let sem = sem.clone();
         let session_dir = session_dir.clone();
-        let referer     = referer.clone();
+        let referer = referer.clone();
         let handle = set.spawn(async move {
             let result = async {
                 let _permit = sem.acquire_owned().await.ok()?;
                 let resp = crate::scraper::fetch_image(&client, &url, Some(&referer))
-                    .await.ok()?;
+                    .await
+                    .ok()?;
                 let bytes = resp.bytes().await.ok()?;
                 // Validation, file write and any fallback decode are blocking work.
                 tokio::task::spawn_blocking(move || save_page(&bytes, &session_dir, page))
-                    .await.ok()?
-            }.await;
+                    .await
+                    .ok()?
+            }
+            .await;
             (page, result)
         });
         task_page.insert(handle.id(), page);
@@ -1827,9 +1984,9 @@ async fn fetch_chapter_images(
     }
 
     if failures > 0 {
-        let _ = err_tx.send(
-            format!("{failures}/{total} pages failed to load")
-        ).await;
+        let _ = err_tx
+            .send(format!("{failures}/{total} pages failed to load"))
+            .await;
     }
 
     let _ = tx.send(None).await;
@@ -1842,9 +1999,9 @@ fn page_extension(bytes: &[u8]) -> Result<&'static str> {
     use image::ImageFormat;
     match image::guess_format(bytes)? {
         ImageFormat::Jpeg => Ok("jpg"),
-        ImageFormat::Png  => Ok("png"),
+        ImageFormat::Png => Ok("png"),
         ImageFormat::WebP => Ok("webp"),
-        ImageFormat::Gif  => Ok("gif"),
+        ImageFormat::Gif => Ok("gif"),
         ImageFormat::Avif => Ok("avif"),
         other => Err(anyhow::anyhow!("unsupported page format {other:?}")),
     }
@@ -1875,7 +2032,8 @@ fn viewer_log_dir(xdg_state: Option<&str>, home: Option<&str>) -> Option<std::pa
     use std::path::PathBuf;
     match xdg_state.filter(|s| s.starts_with('/')) {
         Some(x) => Some(PathBuf::from(x).join("mrm")),
-        None => home.filter(|h| !h.is_empty())
+        None => home
+            .filter(|h| !h.is_empty())
             .map(|h| PathBuf::from(h).join(".local/state/mrm")),
     }
 }
@@ -1901,11 +2059,20 @@ fn open_state_log(name: &str, append: bool) -> Option<std::fs::File> {
 fn open_log_in(dir: &std::path::Path, name: &str, append: bool) -> Option<std::fs::File> {
     use std::fs::Permissions;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .ok()?;
     let _ = std::fs::set_permissions(dir, Permissions::from_mode(0o700));
     let f = std::fs::OpenOptions::new()
-        .write(true).create(true).truncate(!append).append(append).mode(0o600)
-        .open(dir.join(name)).ok()?;
+        .write(true)
+        .create(true)
+        .truncate(!append)
+        .append(append)
+        .mode(0o600)
+        .open(dir.join(name))
+        .ok()?;
     let _ = f.set_permissions(Permissions::from_mode(0o600));
     Some(f)
 }
@@ -1991,7 +2158,11 @@ mod msg_tests {
     #[test]
     fn now_before_set_is_not_expired() {
         let t0 = Instant::now();
-        assert!(!msg_expired(t0 + Duration::from_secs(1), t0, Duration::from_secs(2)));
+        assert!(!msg_expired(
+            t0 + Duration::from_secs(1),
+            t0,
+            Duration::from_secs(2)
+        ));
     }
 }
 
@@ -2056,7 +2227,10 @@ mod complete_tests {
     fn only_closing_the_viewer_or_moving_on_counts_as_finished() {
         assert!(ReaderExit::ViewerClosed.finished());
         assert!(ReaderExit::NextChapter.finished());
-        assert!(!ReaderExit::Back.finished(), "Esc must not mark the chapter read");
+        assert!(
+            !ReaderExit::Back.finished(),
+            "Esc must not mark the chapter read"
+        );
         assert!(!ReaderExit::PrevChapter.finished());
         assert!(!ReaderExit::Quit.finished());
     }
@@ -2129,8 +2303,14 @@ mod page_ext_tests {
 
     #[test]
     fn detects_formats_by_magic_bytes() {
-        assert_eq!(page_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F']).unwrap(), "jpg");
-        assert_eq!(page_extension(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap(), "png");
+        assert_eq!(
+            page_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F']).unwrap(),
+            "jpg"
+        );
+        assert_eq!(
+            page_extension(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap(),
+            "png"
+        );
         assert_eq!(page_extension(b"RIFF\x24\0\0\0WEBPVP8 ").unwrap(), "webp");
         assert_eq!(page_extension(b"GIF89a\x01\0\x01\0").unwrap(), "gif");
     }
@@ -2200,10 +2380,19 @@ mod page_ext_tests {
         let dir = scratch_dir("cap");
         append_capped_log(&dir, "panic.log", "first", 10);
         append_capped_log(&dir, "panic.log", "second", 10); // 6 bytes < 10: appended
-        assert_eq!(std::fs::read_to_string(dir.join("panic.log")).unwrap(), "first\nsecond\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("panic.log")).unwrap(),
+            "first\nsecond\n"
+        );
         append_capped_log(&dir, "panic.log", "third", 10); // 13 bytes >= 10: rotated
-        assert_eq!(std::fs::read_to_string(dir.join("panic.log")).unwrap(), "third\n");
-        assert_eq!(std::fs::read_to_string(dir.join("panic.log.old")).unwrap(), "first\nsecond\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("panic.log")).unwrap(),
+            "third\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("panic.log.old")).unwrap(),
+            "first\nsecond\n"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
@@ -2250,13 +2439,20 @@ mod task_tests {
     // --- search_registry ----------------------------------------------------
 
     /// Answers search with one result titled after itself, or fails.
-    struct Fake { name: &'static str, fail: bool }
+    struct Fake {
+        name: &'static str,
+        fail: bool,
+    }
 
     #[async_trait]
     impl Scraper for Fake {
-        fn source_name(&self) -> &'static str { self.name }
+        fn source_name(&self) -> &'static str {
+            self.name
+        }
         async fn search(&self, q: &str) -> Result<Vec<SearchResult>> {
-            if self.fail { anyhow::bail!("down"); }
+            if self.fail {
+                anyhow::bail!("down");
+            }
             Ok(vec![SearchResult {
                 title: format!("{} {q}", self.name),
                 cover_url: None,
@@ -2266,10 +2462,14 @@ mod task_tests {
             }])
         }
         async fn get_series(&self, url: &str) -> Result<SeriesData> {
-            if self.fail { anyhow::bail!("down"); }
+            if self.fail {
+                anyhow::bail!("down");
+            }
             Ok(series(3, url))
         }
-        async fn get_chapter_image_urls(&self, _: &str) -> Result<Vec<String>> { Ok(vec![]) }
+        async fn get_chapter_image_urls(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
     }
 
     fn registry(entries: &[(&'static str, bool)]) -> Registry {
@@ -2302,7 +2502,8 @@ mod task_tests {
         let pool = test_pool().await?;
         let config = crate::config::parse_config(
             "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n",
-        ).unwrap();
+        )
+        .unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
         let mut app = App::new(pool, None, config, tx).await.unwrap();
         app.registry = Arc::new(reg);
@@ -2315,11 +2516,16 @@ mod task_tests {
 
     /// A chapter open in the Reader with every page loaded.
     async fn reader_with_loaded_chapter(app: &mut App, url: &str) -> (i64, i64) {
-        let mid = db::insert_manhwa_with_chapters(&app.pool, &crate::db::tests::series(3, url), "asura")
-            .await.unwrap();
+        let mid =
+            db::insert_manhwa_with_chapters(&app.pool, &crate::db::tests::series(3, url), "asura")
+                .await
+                .unwrap();
         let cid = db::fetch_chapters(&app.pool, mid).await.unwrap()[0].id;
         db::start_chapter(&app.pool, cid).await.unwrap(); // what opening a chapter does
-        app.screen = Screen::Reader { manhwa_id: mid, chapter_id: cid };
+        app.screen = Screen::Reader {
+            manhwa_id: mid,
+            chapter_id: cid,
+        };
         app.viewer_launched = true;
         app.loading_finished = true;
         app.pages_ok = 5;
@@ -2328,22 +2534,34 @@ mod task_tests {
     }
 
     async fn completed(app: &App, mid: i64, cid: i64) -> bool {
-        db::fetch_chapters(&app.pool, mid).await.unwrap()
-            .into_iter().find(|c| c.id == cid).unwrap().completed
+        db::fetch_chapters(&app.pool, mid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == cid)
+            .unwrap()
+            .completed
     }
 
     #[tokio::test]
     async fn esc_in_the_reader_does_not_mark_the_chapter_read() {
-        let Some((mut app, _rx)) = test_app(registry(&[])).await else { return };
+        let Some((mut app, _rx)) = test_app(registry(&[])).await else {
+            return;
+        };
         let (mid, cid) = reader_with_loaded_chapter(&mut app, "https://x/esc-reader").await;
         app.handle_event(key(KeyCode::Esc)).await.unwrap();
         assert_eq!(app.screen, Screen::Detail { manhwa_id: mid });
-        assert!(!completed(&app, mid, cid).await, "Esc marked the chapter read");
+        assert!(
+            !completed(&app, mid, cid).await,
+            "Esc marked the chapter read"
+        );
     }
 
     #[tokio::test]
     async fn closing_the_viewer_marks_the_chapter_read() {
-        let Some((mut app, _rx)) = test_app(registry(&[])).await else { return };
+        let Some((mut app, _rx)) = test_app(registry(&[])).await else {
+            return;
+        };
         let (mid, cid) = reader_with_loaded_chapter(&mut app, "https://x/close-viewer").await;
         app.viewer_exited = true;
         app.handle_event(AppEvent::Tick).await.unwrap();
@@ -2352,11 +2570,16 @@ mod task_tests {
 
     #[tokio::test]
     async fn esc_cancels_a_running_search_and_its_late_result_is_ignored() {
-        let Some((mut app, _rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        let Some((mut app, _rx)) = test_app(registry(&[("mangadex", false)])).await else {
+            return;
+        };
         app.screen = Screen::Search;
         app.add_search_query = "solo".into();
         app.start_search();
-        assert!(app.add_search_loading, "loading flag must be set before the result arrives");
+        assert!(
+            app.add_search_loading,
+            "loading flag must be set before the result arrives"
+        );
         let seq = app.search_job.last_seq;
 
         app.handle_event(key(KeyCode::Esc)).await.unwrap();
@@ -2365,18 +2588,32 @@ mod task_tests {
         assert_eq!(app.screen, Screen::Search);
 
         app.handle_event(AppEvent::SearchDone {
-            seq, results: vec![], errors: vec!["late".into()],
-        }).await.unwrap();
-        assert!(app.add_search_error.is_none(), "cancelled search result was applied");
+            seq,
+            results: vec![],
+            errors: vec!["late".into()],
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.add_search_error.is_none(),
+            "cancelled search result was applied"
+        );
         assert!(app.add_search_input_active);
     }
 
-    fn press(c: KeyCode) -> AppEvent { AppEvent::Key(KeyEvent::new(c, KeyModifiers::NONE)) }
+    fn press(c: KeyCode) -> AppEvent {
+        AppEvent::Key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
 
     #[tokio::test]
     async fn question_mark_opens_help_outside_the_search_input() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
-        assert!(app.add_search_input_active, "rests at true off the Search screen");
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
+        assert!(
+            app.add_search_input_active,
+            "rests at true off the Search screen"
+        );
         app.handle_event(press(KeyCode::Char('?'))).await.unwrap();
         assert!(app.show_help);
         app.handle_event(press(KeyCode::Char('x'))).await.unwrap();
@@ -2390,7 +2627,9 @@ mod task_tests {
 
     #[tokio::test]
     async fn remapped_back_and_open_letters_are_typed_in_the_search_input() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         app.keys.back = "h".into();
         app.keys.open = "l".into();
         app.screen = Screen::Search;
@@ -2406,11 +2645,15 @@ mod task_tests {
 
     #[tokio::test]
     async fn library_selection_follows_the_series_across_a_reload() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         for (i, t) in ["a", "b", "c"].iter().enumerate() {
             let mut s = crate::db::tests::series(1, &format!("https://x/sel{i}"));
             s.title = t.to_string();
-            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex")
+                .await
+                .unwrap();
         }
         app.reload_manhwa().await.unwrap();
         app.sort_mode = SortMode::Title;
@@ -2419,7 +2662,9 @@ mod task_tests {
         // A new series sorting before the selection shifts it down one.
         let mut s = crate::db::tests::series(1, "https://x/sel-new");
         s.title = "0".into();
-        crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex")
+            .await
+            .unwrap();
         app.reload_manhwa().await.unwrap();
         assert_eq!(app.library_sel, 2);
         assert_eq!(app.selected_manhwa_id(), Some(id));
@@ -2427,32 +2672,60 @@ mod task_tests {
 
     #[tokio::test]
     async fn refresh_of_a_deleted_series_says_so() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         let s = crate::db::tests::series(1, "https://x/gone");
-        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex")
+            .await
+            .unwrap();
         crate::db::delete_manhwa(&app.pool, id).await.unwrap();
-        app.handle_event(AppEvent::RefreshDone { manhwa_id: id, result: Ok(s) }).await.unwrap();
-        assert_eq!(app.status_msg.as_deref(), Some("Refresh skipped: series no longer in library"));
+        app.handle_event(AppEvent::RefreshDone {
+            manhwa_id: id,
+            result: Ok(s),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("Refresh skipped: series no longer in library")
+        );
     }
 
     #[tokio::test]
     async fn refresh_db_error_is_not_mislabelled_as_deleted() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         let s = crate::db::tests::series(1, "https://x/dberr");
-        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+        let id = crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex")
+            .await
+            .unwrap();
         app.pool.close().await;
-        let r = app.handle_event(AppEvent::RefreshDone { manhwa_id: id, result: Ok(s) }).await;
+        let r = app
+            .handle_event(AppEvent::RefreshDone {
+                manhwa_id: id,
+                result: Ok(s),
+            })
+            .await;
         assert!(r.is_err(), "a database failure must propagate");
-        assert_ne!(app.status_msg.as_deref(), Some("Refresh skipped: series no longer in library"));
+        assert_ne!(
+            app.status_msg.as_deref(),
+            Some("Refresh skipped: series no longer in library")
+        );
     }
 
     #[tokio::test]
     async fn opening_the_library_filter_keeps_the_selected_series() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         for (i, t) in ["a", "b", "c"].iter().enumerate() {
             let mut s = crate::db::tests::series(1, &format!("https://x/flt{i}"));
             s.title = t.to_string();
-            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex").await.unwrap();
+            crate::db::insert_manhwa_with_chapters(&app.pool, &s, "mangadex")
+                .await
+                .unwrap();
         }
         app.reload_manhwa().await.unwrap();
         app.sort_mode = SortMode::Title;
@@ -2461,7 +2734,11 @@ mod task_tests {
         let id = app.selected_manhwa_id().unwrap();
         app.handle_event(press(KeyCode::Char('/'))).await.unwrap();
         assert!(app.search_query.is_empty());
-        assert_eq!(app.selected_manhwa_id(), Some(id), "cursor must stay on the same series");
+        assert_eq!(
+            app.selected_manhwa_id(),
+            Some(id),
+            "cursor must stay on the same series"
+        );
     }
 
     #[test]
@@ -2479,7 +2756,11 @@ mod task_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         forward_rv_socket(Counting(data, &total), tx);
         assert_eq!(rx.try_recv().unwrap(), "/run/rv.sock");
-        assert_eq!(total.load(std::sync::atomic::Ordering::SeqCst), data.len(), "stdout not drained to EOF");
+        assert_eq!(
+            total.load(std::sync::atomic::Ordering::SeqCst),
+            data.len(),
+            "stdout not drained to EOF"
+        );
     }
 
     #[test]
@@ -2506,7 +2787,9 @@ mod task_tests {
 
     #[tokio::test]
     async fn search_result_arrives_as_an_event() {
-        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else {
+            return;
+        };
         app.screen = Screen::Search;
         app.add_search_query = "solo".into();
         app.start_search();
@@ -2519,57 +2802,98 @@ mod task_tests {
 
     #[tokio::test]
     async fn disabled_source_is_never_fetched_for_add() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         app.screen = Screen::Search;
         app.add_search_results = vec![SearchResult {
-            title: "t".into(), cover_url: None, source_url: "https://x/t".into(),
-            pub_status: "ongoing".into(), source: "asura".into(),
+            title: "t".into(),
+            cover_url: None,
+            source_url: "https://x/t".into(),
+            pub_status: "ongoing".into(),
+            source: "asura".into(),
         }];
         app.do_add_manhwa();
         assert!(!app.add_search_loading);
-        assert!(app.add_search_error.as_deref().unwrap_or("").contains("disabled"));
+        assert!(app
+            .add_search_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("disabled"));
     }
 
     #[tokio::test]
     async fn refresh_applies_new_chapters_without_claiming() {
-        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else { return };
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", false)])).await else {
+            return;
+        };
         let url = "https://x/refresh";
-        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, url), "mangadex").await.unwrap();
+        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, url), "mangadex")
+            .await
+            .unwrap();
         app.open_detail(id).await.unwrap();
         assert_eq!(app.chapter_list.len(), 1);
 
         app.handle_event(key(KeyCode::Char('R'))).await.unwrap();
-        assert_eq!(app.refreshing, Some(id), "refresh flag must be set before the result arrives");
+        assert_eq!(
+            app.refreshing,
+            Some(id),
+            "refresh flag must be set before the result arrives"
+        );
         let ev = rx.recv().await.unwrap();
         app.handle_event(ev).await.unwrap();
 
         assert_eq!(app.refreshing, None);
-        assert_eq!(app.chapter_list.len(), 3, "fetched chapters were not applied");
+        assert_eq!(
+            app.chapter_list.len(),
+            3,
+            "fetched chapters were not applied"
+        );
         let unclaimed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM chapter WHERE manhwa_id = $1 AND notified_at IS NULL",
-        ).bind(id).fetch_one(&app.pool).await.unwrap();
-        assert_eq!(unclaimed, 2, "refresh must leave new chapters for the notifying poller");
+        )
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unclaimed, 2,
+            "refresh must leave new chapters for the notifying poller"
+        );
     }
 
     #[tokio::test]
     async fn failed_refresh_marks_the_series_failing() {
-        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", true)])).await else { return };
-        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, "https://x/rf"), "mangadex").await.unwrap();
+        let Some((mut app, mut rx)) = test_app(registry(&[("mangadex", true)])).await else {
+            return;
+        };
+        let id = db::insert_manhwa_with_chapters(&app.pool, &series(1, "https://x/rf"), "mangadex")
+            .await
+            .unwrap();
         app.open_detail(id).await.unwrap();
 
         app.handle_event(key(KeyCode::Char('R'))).await.unwrap();
         let ev = rx.recv().await.unwrap();
         app.handle_event(ev).await.unwrap();
 
-        assert!(app.status_msg.as_deref().unwrap_or("").starts_with("Refresh failed"));
+        assert!(app
+            .status_msg
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Refresh failed"));
         let m = app.current_manhwa.as_ref().unwrap();
         assert_eq!(m.last_error.as_deref(), Some("down"));
-        assert!(m.failing_since.is_some(), "the detail view must see the failure");
+        assert!(
+            m.failing_since.is_some(),
+            "the detail view must see the failure"
+        );
     }
 
     #[tokio::test]
     async fn poll_now_key_wakes_the_coordinator() {
-        let Some((mut app, _rx)) = test_app(Registry::new()).await else { return };
+        let Some((mut app, _rx)) = test_app(Registry::new()).await else {
+            return;
+        };
         let poll_now = app.poll_now.clone();
         app.handle_event(key(KeyCode::Char('p'))).await.unwrap();
         tokio::time::timeout(Duration::from_millis(100), poll_now.notified())

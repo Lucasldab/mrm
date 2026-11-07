@@ -63,7 +63,10 @@ pub fn read_token(path: &FsPath) -> Result<String> {
     let meta = std::fs::metadata(path)
         .with_context(|| format!("token file {} is missing", path.display()))?;
     if meta.permissions().mode() & 0o044 != 0 {
-        anyhow::bail!("token file {} is readable by group/other — chmod 600 it", path.display());
+        anyhow::bail!(
+            "token file {} is readable by group/other — chmod 600 it",
+            path.display()
+        );
     }
     let token = std::fs::read_to_string(path)
         .with_context(|| format!("could not read token file {}", path.display()))?
@@ -86,7 +89,10 @@ fn token_eq(given: &[u8], expected: &[u8]) -> bool {
     if given.len() != expected.len() {
         return false;
     }
-    let diff = given.iter().zip(expected).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    let diff = given
+        .iter()
+        .zip(expected)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
     std::hint::black_box(diff) == 0
 }
 
@@ -96,7 +102,7 @@ fn token_eq(given: &[u8], expected: &[u8]) -> bool {
 
 /// An upstream image response.
 pub struct Fetched {
-    pub bytes:        Bytes,
+    pub bytes: Bytes,
     pub content_type: Option<String>,
 }
 
@@ -131,13 +137,22 @@ impl HttpFetcher {
 impl Fetcher for HttpFetcher {
     async fn fetch(&self, source: &str, url: &str, referer: Option<&str>) -> Result<Fetched> {
         let client = self.client(source)?;
-        let resp = crate::scraper::fetch_image(&client, url, referer).await
+        let resp = crate::scraper::fetch_image(&client, url, referer)
+            .await
             .map_err(|e| anyhow::anyhow!("{}", e.without_url()))?;
-        let content_type = resp.headers().get(header::CONTENT_TYPE)
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let bytes = resp.bytes().await.map_err(|e| anyhow::anyhow!("{}", e.without_url()))?;
-        Ok(Fetched { bytes, content_type })
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.without_url()))?;
+        Ok(Fetched {
+            bytes,
+            content_type,
+        })
     }
 }
 
@@ -147,19 +162,19 @@ impl Fetcher for HttpFetcher {
 
 /// A chapter's resolved image URLs plus what fetching them needs.
 struct PageList {
-    at:          Instant,
-    source:      String,
+    at: Instant,
+    source: String,
     chapter_url: String,
-    urls:        Vec<String>,
+    urls: Vec<String>,
 }
 
 pub struct AppState {
-    pool:       PgPool,
-    registry:   Arc<Registry>,
-    fetcher:    Arc<dyn Fetcher>,
-    token:      String,
-    pages:      DiskCache,
-    covers:     DiskCache,
+    pool: PgPool,
+    registry: Arc<Registry>,
+    fetcher: Arc<dyn Fetcher>,
+    token: String,
+    pages: DiskCache,
+    covers: DiskCache,
     page_lists: Mutex<HashMap<i64, Arc<PageList>>>,
 }
 
@@ -177,8 +192,8 @@ impl AppState {
             registry,
             fetcher,
             token,
-            pages:      DiskCache::new(cache_root.join("serve-pages"), Some(PAGE_CACHE_CAP)),
-            covers:     DiskCache::new(cache_root.join("serve-covers"), None),
+            pages: DiskCache::new(cache_root.join("serve-pages"), Some(PAGE_CACHE_CAP)),
+            covers: DiskCache::new(cache_root.join("serve-covers"), None),
             page_lists: Mutex::new(HashMap::new()),
         }
     }
@@ -216,9 +231,13 @@ pub fn router(state: Arc<AppState>) -> Router {
 pub async fn run(state: AppState, addr: &str) -> Result<()> {
     let sweep = state.pages.clone();
     tokio::task::spawn_blocking(move || sweep.sweep());
-    let listener = tokio::net::TcpListener::bind(addr).await
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
         .with_context(|| format!("could not bind {addr}"))?;
-    eprintln!("mrm: serve mode — listening on http://{}", listener.local_addr()?);
+    eprintln!(
+        "mrm: serve mode — listening on http://{}",
+        listener.local_addr()?
+    );
     axum::serve(listener, router(Arc::new(state)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -230,8 +249,10 @@ async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let term = async {
         match signal(SignalKind::terminate()) {
-            Ok(mut s) => { s.recv().await; }
-            Err(_)    => std::future::pending::<()>().await,
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
         }
     };
     tokio::select! {
@@ -249,13 +270,19 @@ async fn log_request(req: Request, next: Next) -> Response {
     let resp = next.run(req).await;
     let image = path.contains("/pages/") || path.ends_with("/cover");
     if !(image && resp.status().is_success()) {
-        eprintln!("mrm serve: {method} {path} {} {}ms", resp.status().as_u16(), started.elapsed().as_millis());
+        eprintln!(
+            "mrm serve: {method} {path} {} {}ms",
+            resp.status().as_u16(),
+            started.elapsed().as_millis()
+        );
     }
     resp
 }
 
 async fn require_token(State(st): St, req: Request, next: Next) -> Response {
-    let ok = req.headers().get(header::AUTHORIZATION)
+    let ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .is_some_and(|t| token_eq(t.trim().as_bytes(), st.token.as_bytes()));
@@ -273,17 +300,26 @@ async fn require_token(State(st): St, req: Request, next: Next) -> Response {
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
-    msg:    String,
+    msg: String,
 }
 
 impl ApiError {
     fn new(status: StatusCode, msg: impl Into<String>) -> Self {
-        Self { status, msg: msg.into() }
+        Self {
+            status,
+            msg: msg.into(),
+        }
     }
-    fn bad_request(msg: impl Into<String>) -> Self { Self::new(StatusCode::BAD_REQUEST, msg) }
-    fn not_found(msg: impl Into<String>) -> Self { Self::new(StatusCode::NOT_FOUND, msg) }
+    fn bad_request(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, msg)
+    }
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, msg)
+    }
     /// The source failed us (scrape, image fetch) or is not enabled here.
-    fn upstream(msg: impl Into<String>) -> Self { Self::new(StatusCode::BAD_GATEWAY, msg) }
+    fn upstream(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, msg)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -295,7 +331,10 @@ impl IntoResponse for ApiError {
 /// Internal errors: a vanished row is a 404, anything else is logged and 500.
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) {
+        if matches!(
+            e.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::RowNotFound)
+        ) {
             return Self::not_found("not found");
         }
         eprintln!("mrm serve: internal error: {e:#}");
@@ -313,7 +352,8 @@ struct ApiPath<T>(T);
 impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath<T> {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
-        Path::<T>::from_request_parts(parts, state).await
+        Path::<T>::from_request_parts(parts, state)
+            .await
             .map(|Path(t)| ApiPath(t))
             .map_err(|e| ApiError::bad_request(e.body_text()))
     }
@@ -325,7 +365,8 @@ struct ApiJson<T>(T);
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
     type Rejection = ApiError;
     async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
-        Json::<T>::from_request(req, state).await
+        Json::<T>::from_request(req, state)
+            .await
             .map(|Json(t)| ApiJson(t))
             .map_err(|e| ApiError::bad_request(e.body_text()))
     }
@@ -339,32 +380,32 @@ type ApiResult<T> = Result<T, ApiError>;
 
 #[derive(Debug, Serialize)]
 pub struct Series {
-    id:         i64,
-    title:      String,
-    source:     String,
-    status:     &'static str,
+    id: i64,
+    title: String,
+    source: String,
+    status: &'static str,
     pub_status: String,
-    unread:     u32,
-    total:      u32,
-    cover:      String,
-    failing:    bool,
-    note:       Option<String>,
+    unread: u32,
+    total: u32,
+    cover: String,
+    failing: bool,
+    note: Option<String>,
 }
 
 impl From<&Manhwa> for Series {
     fn from(m: &Manhwa) -> Self {
         let failing = m.failing_since.is_some();
         Self {
-            id:         m.id,
-            title:      m.title.clone(),
-            source:     m.source.clone(),
-            status:     m.status.as_str(),
+            id: m.id,
+            title: m.title.clone(),
+            source: m.source.clone(),
+            status: m.status.as_str(),
             pub_status: m.pub_status.clone(),
-            unread:     m.unread,
-            total:      m.total,
-            cover:      format!("/api/series/{}/cover", m.id),
+            unread: m.unread,
+            total: m.total,
+            cover: format!("/api/series/{}/cover", m.id),
             failing,
-            note:       if failing { m.last_error.clone() } else { None },
+            note: if failing { m.last_error.clone() } else { None },
         }
     }
 }
@@ -372,64 +413,73 @@ impl From<&Manhwa> for Series {
 #[derive(Debug, Serialize)]
 pub struct SeriesDetail {
     #[serde(flatten)]
-    series:      Series,
+    series: Series,
     description: Option<String>,
-    chapters:    Vec<ChapterOut>,
+    chapters: Vec<ChapterOut>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChapterOut {
-    id:          i64,
-    number:      f64,
-    title:       Option<String>,
+    id: i64,
+    number: f64,
+    title: Option<String>,
     released_at: Option<String>,
-    read:        bool,
+    read: bool,
 }
 
 impl From<&Chapter> for ChapterOut {
     fn from(c: &Chapter) -> Self {
         Self {
-            id:          c.id,
-            number:      c.number,
-            title:       c.title.clone(),
+            id: c.id,
+            number: c.number,
+            title: c.title.clone(),
             released_at: c.released_at.clone(),
-            read:        c.completed,
+            read: c.completed,
         }
     }
 }
 
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
-    title:      String,
-    source:     String,
+    title: String,
+    source: String,
     source_url: String,
     pub_status: String,
-    cover_url:  Option<String>,
+    cover_url: Option<String>,
 }
 
 impl From<SearchResult> for SearchHit {
     fn from(r: SearchResult) -> Self {
         Self {
-            title:      r.title,
-            source:     r.source,
+            title: r.title,
+            source: r.source,
             source_url: r.source_url,
             pub_status: r.pub_status,
-            cover_url:  r.cover_url,
+            cover_url: r.cover_url,
         }
     }
 }
 
 #[derive(Deserialize)]
-struct StatusBody { status: String }
+struct StatusBody {
+    status: String,
+}
 
 #[derive(Deserialize)]
-struct ReadBody { read: bool }
+struct ReadBody {
+    read: bool,
+}
 
 #[derive(Deserialize)]
-struct AddBody { source: String, source_url: String }
+struct AddBody {
+    source: String,
+    source_url: String,
+}
 
 #[derive(Deserialize)]
-struct SearchQuery { q: Option<String> }
+struct SearchQuery {
+    q: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -445,19 +495,21 @@ async fn library(State(st): St) -> ApiResult<Json<Vec<Series>>> {
 }
 
 async fn fetch_series(st: &AppState, id: i64) -> ApiResult<Manhwa> {
-    db::fetch_manhwa(&st.pool, id).await.map_err(|e| match ApiError::from(e) {
-        e if e.status == StatusCode::NOT_FOUND => ApiError::not_found("series not found"),
-        e => e,
-    })
+    db::fetch_manhwa(&st.pool, id)
+        .await
+        .map_err(|e| match ApiError::from(e) {
+            e if e.status == StatusCode::NOT_FOUND => ApiError::not_found("series not found"),
+            e => e,
+        })
 }
 
 async fn detail(st: &AppState, id: i64) -> ApiResult<SeriesDetail> {
     let m = fetch_series(st, id).await?;
     let chapters = db::fetch_chapters(&st.pool, id).await?;
     Ok(SeriesDetail {
-        series:      Series::from(&m),
+        series: Series::from(&m),
         description: m.description.clone(),
-        chapters:    chapters.iter().map(ChapterOut::from).collect(),
+        chapters: chapters.iter().map(ChapterOut::from).collect(),
     })
 }
 
@@ -471,7 +523,8 @@ async fn set_status(
     ApiPath(id): ApiPath<i64>,
     ApiJson(body): ApiJson<StatusBody>,
 ) -> ApiResult<Json<Series>> {
-    let chosen = Status::all().iter()
+    let chosen = Status::all()
+        .iter()
         .find(|s| s.as_str() == body.status)
         .ok_or_else(|| ApiError::bad_request(format!("unknown status '{}'", body.status)))?;
     fetch_series(&st, id).await?;
@@ -483,10 +536,12 @@ async fn set_status(
 /// chapters through the poll write path (never claimed), then metadata.
 async fn refresh(State(st): St, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<SeriesDetail>> {
     let m = fetch_series(&st, id).await?;
-    let scraper = st.registry.get(m.source.as_str())
+    let scraper = st
+        .registry
+        .get(m.source.as_str())
         .ok_or_else(|| ApiError::upstream(source_unavailable(&m.source)))?;
     let series = match scraper.get_series(&m.source_url).await {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             let e = format!("{e:#}");
             db::record_poll_failure(&st.pool, id, &e).await?;
@@ -504,8 +559,8 @@ async fn refresh(State(st): St, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Ser
 #[derive(Serialize)]
 struct ReadOut {
     chapter_id: i64,
-    read:       bool,
-    series:     Series,
+    read: bool,
+    series: Series,
 }
 
 /// The TUI Detail screen's mark read (`r`) / mark unread (`u`).
@@ -514,7 +569,8 @@ async fn set_read(
     ApiPath(id): ApiPath<i64>,
     ApiJson(body): ApiJson<ReadBody>,
 ) -> ApiResult<Json<ReadOut>> {
-    let manhwa_id = db::chapter_manhwa_id(&st.pool, id).await?
+    let manhwa_id = db::chapter_manhwa_id(&st.pool, id)
+        .await?
         .ok_or_else(|| ApiError::not_found("chapter not found"))?;
     if body.read {
         db::start_chapter(&st.pool, id).await?;
@@ -524,7 +580,11 @@ async fn set_read(
     }
     db::recompute_status(&st.pool, manhwa_id).await?;
     let series = Series::from(&fetch_series(&st, manhwa_id).await?);
-    Ok(Json(ReadOut { chapter_id: id, read: body.read, series }))
+    Ok(Json(ReadOut {
+        chapter_id: id,
+        read: body.read,
+        series,
+    }))
 }
 
 /// A chapter's image URLs from the series' scraper, reused for 15 minutes.
@@ -536,30 +596,48 @@ async fn page_list(st: &AppState, chapter_id: i64) -> ApiResult<Arc<PageList>> {
             return Ok(l.clone());
         }
     }
-    let (source, chapter_url) = db::chapter_source(&st.pool, chapter_id).await?
+    let (source, chapter_url) = db::chapter_source(&st.pool, chapter_id)
+        .await?
         .ok_or_else(|| ApiError::not_found("chapter not found"))?;
-    let scraper = st.registry.get(source.as_str())
+    let scraper = st
+        .registry
+        .get(source.as_str())
         .ok_or_else(|| ApiError::upstream(source_unavailable(&source)))?;
-    let urls = scraper.get_chapter_image_urls(&chapter_url).await
+    let urls = scraper
+        .get_chapter_image_urls(&chapter_url)
+        .await
         .map_err(|e| ApiError::upstream(format!("{e:#}")))?;
     if urls.is_empty() {
         return Err(ApiError::upstream("chapter has no images"));
     }
-    let list = Arc::new(PageList { at: Instant::now(), source, chapter_url, urls });
-    st.page_lists.lock().unwrap_or_else(|e| e.into_inner()).insert(chapter_id, list.clone());
+    let list = Arc::new(PageList {
+        at: Instant::now(),
+        source,
+        chapter_url,
+        urls,
+    });
+    st.page_lists
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(chapter_id, list.clone());
     Ok(list)
 }
 
 #[derive(Serialize)]
 struct PagesOut {
     chapter_id: i64,
-    pages:      Vec<String>,
+    pages: Vec<String>,
 }
 
 async fn pages(State(st): St, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<PagesOut>> {
     let list = page_list(&st, id).await?;
-    let pages = (0..list.urls.len()).map(|n| format!("/api/chapters/{id}/pages/{n}")).collect();
-    Ok(Json(PagesOut { chapter_id: id, pages }))
+    let pages = (0..list.urls.len())
+        .map(|n| format!("/api/chapters/{id}/pages/{n}"))
+        .collect();
+    Ok(Json(PagesOut {
+        chapter_id: id,
+        pages,
+    }))
 }
 
 async fn page(State(st): St, ApiPath((id, n)): ApiPath<(i64, u32)>) -> ApiResult<Response> {
@@ -568,8 +646,14 @@ async fn page(State(st): St, ApiPath((id, n)): ApiPath<(i64, u32)>) -> ApiResult
         return Ok(image_response(bytes, None));
     }
     let list = page_list(&st, id).await?;
-    let url = list.urls.get(n as usize).ok_or_else(|| ApiError::not_found("page not found"))?;
-    let fetched = st.fetcher.fetch(&list.source, url, Some(&list.chapter_url)).await
+    let url = list
+        .urls
+        .get(n as usize)
+        .ok_or_else(|| ApiError::not_found("page not found"))?;
+    let fetched = st
+        .fetcher
+        .fetch(&list.source, url, Some(&list.chapter_url))
+        .await
         .map_err(|e| ApiError::upstream(format!("page {n}: {e:#}")))?;
     checked_image(&fetched)?;
     st.pages.put(&key, fetched.bytes.clone()).await;
@@ -582,8 +666,14 @@ async fn cover(State(st): St, ApiPath(id): ApiPath<i64>) -> ApiResult<Response> 
         return Ok(image_response(bytes, None));
     }
     let m = fetch_series(&st, id).await?;
-    let url = m.cover_url.as_deref().ok_or_else(|| ApiError::not_found("series has no cover"))?;
-    let fetched = st.fetcher.fetch(&m.source, url, None).await
+    let url = m
+        .cover_url
+        .as_deref()
+        .ok_or_else(|| ApiError::not_found("series has no cover"))?;
+    let fetched = st
+        .fetcher
+        .fetch(&m.source, url, None)
+        .await
         .map_err(|e| ApiError::upstream(format!("cover: {e:#}")))?;
     checked_image(&fetched)?;
     st.covers.put(&key, fetched.bytes.clone()).await;
@@ -603,7 +693,11 @@ fn checked_image(f: &Fetched) -> ApiResult<()> {
 fn image_response(bytes: Bytes, upstream_type: Option<String>) -> Response {
     let ct = upstream_type
         .filter(|t| t.starts_with("image/"))
-        .or_else(|| image::guess_format(&bytes).ok().map(|f| f.to_mime_type().to_string()))
+        .or_else(|| {
+            image::guess_format(&bytes)
+                .ok()
+                .map(|f| f.to_mime_type().to_string())
+        })
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let ct = HeaderValue::from_str(&ct)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
@@ -612,36 +706,62 @@ fn image_response(bytes: Bytes, upstream_type: Option<String>) -> Response {
 
 #[derive(Serialize)]
 struct SearchOut {
-    hits:   Vec<SearchHit>,
+    hits: Vec<SearchHit>,
     errors: Vec<String>,
 }
 
-async fn search(State(st): St, query: Result<Query<SearchQuery>, axum::extract::rejection::QueryRejection>) -> ApiResult<Json<SearchOut>> {
+async fn search(
+    State(st): St,
+    query: Result<Query<SearchQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<Json<SearchOut>> {
     let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let q = query.q.as_deref().map(str::trim).unwrap_or("");
     if q.is_empty() {
         return Err(ApiError::bad_request("missing query parameter q"));
     }
     let (results, errors) = search_registry(&st.registry, q).await;
-    Ok(Json(SearchOut { hits: results.into_iter().map(SearchHit::from).collect(), errors }))
+    Ok(Json(SearchOut {
+        hits: results.into_iter().map(SearchHit::from).collect(),
+        errors,
+    }))
 }
 
 /// Add from search, like the TUI: get_series, then insert (chapters start
 /// notified, so adding never pushes).
-async fn add_series(State(st): St, ApiJson(body): ApiJson<AddBody>) -> ApiResult<Json<SeriesDetail>> {
-    let scraper = st.registry.get(body.source.as_str())
+async fn add_series(
+    State(st): St,
+    ApiJson(body): ApiJson<AddBody>,
+) -> ApiResult<Json<SeriesDetail>> {
+    let scraper = st
+        .registry
+        .get(body.source.as_str())
         .ok_or_else(|| ApiError::bad_request(source_unavailable(&body.source)))?;
     let duplicate = || ApiError::new(StatusCode::CONFLICT, "already in library");
-    if db::manhwa_id_by_source_url(&st.pool, &body.source_url).await?.is_some() {
+    if db::manhwa_id_by_source_url(&st.pool, &body.source_url)
+        .await?
+        .is_some()
+    {
         return Err(duplicate());
     }
-    let series = scraper.get_series(&body.source_url).await
+    let series = scraper
+        .get_series(&body.source_url)
+        .await
         .map_err(|e| ApiError::upstream(format!("{e:#}")))?;
     // The source may have redirected onto a URL that is already tracked.
-    if db::manhwa_id_by_source_url(&st.pool, &series.source_url).await?.is_some() {
+    if db::manhwa_id_by_source_url(&st.pool, &series.source_url)
+        .await?
+        .is_some()
+    {
         return Err(duplicate());
     }
-    let id = db::insert_manhwa_with_chapters(&st.pool, &series, &body.source).await
-        .map_err(|e| if e.to_string().starts_with("Already in library") { duplicate() } else { e.into() })?;
+    let id = db::insert_manhwa_with_chapters(&st.pool, &series, &body.source)
+        .await
+        .map_err(|e| {
+            if e.to_string().starts_with("Already in library") {
+                duplicate()
+            } else {
+                e.into()
+            }
+        })?;
     Ok(Json(detail(&st, id).await?))
 }
