@@ -228,9 +228,10 @@ async fn poll_all(
     } else if !quiet {
         match db::claim_unnotified(pool).await {
             Ok(claimed) if !claimed.is_empty() && config.notifications.enabled => {
-                let titles: Vec<String> = claimed.into_iter().map(|(t, _)| t).collect();
+                let ids: Vec<i64> = claimed.iter().map(|c| c.manhwa_id).collect();
+                let titles: Vec<String> = claimed.into_iter().map(|c| c.title).collect();
                 notifier::send_grouped(&titles);
-                notifier::send_grouped_remote(&config.notifications, &titles).await;
+                notifier::send_grouped_remote(&config.notifications, &titles, &ids).await;
             }
             Ok(_) => {}
             Err(e) => log!("mrm: claim error: {e}"),

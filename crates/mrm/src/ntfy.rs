@@ -39,11 +39,12 @@ pub(crate) fn status_error(server: &str, status: reqwest::StatusCode) -> String 
     format!("mrm: ntfy returned {status} from {}", redact_server(server))
 }
 
-/// POST a notification to the configured ntfy topic.
+/// POST a notification to the configured ntfy topic. `click` becomes the
+/// `Click` header (the URL a tap on the push opens).
 ///
 /// Errors are logged but never propagated — a broken phone path must never
 /// kill the polling loop or block desktop notifications.
-pub async fn dispatch(cfg: &NtfyConfig, summary: &str, body: &str) {
+pub async fn dispatch(cfg: &NtfyConfig, summary: &str, body: &str, click: Option<&str>) {
     if !cfg.enabled {
         return;
     }
@@ -77,6 +78,9 @@ pub async fn dispatch(cfg: &NtfyConfig, summary: &str, body: &str) {
 
     if let Some(p) = cfg.priority.as_deref() {
         req = req.header("Priority", p);
+    }
+    if let Some(c) = click {
+        req = req.header("Click", c);
     }
     if let Some(t) = cfg.auth_token.as_deref() {
         req = req.header("Authorization", format!("Bearer {t}"));
@@ -117,5 +121,26 @@ mod tests {
     fn status_error_message_has_no_topic() {
         let m = status_error("https://ntfy.example.org", reqwest::StatusCode::FORBIDDEN);
         assert!(m.contains("403") && m.contains("ntfy.example.org"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_sends_the_click_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let got = tokio::spawn(async move {
+            let (mut sock, _) = l.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+        });
+        let cfg = NtfyConfig {
+            enabled: true, server: format!("http://127.0.0.1:{port}"), topic: "t".into(),
+            priority: None, auth_token: None,
+        };
+        dispatch(&cfg, "s", "b", Some("mrmphone://series/7")).await;
+        let req = got.await.unwrap();
+        assert!(req.contains("click: mrmphone://series/7"), "{req}");
     }
 }

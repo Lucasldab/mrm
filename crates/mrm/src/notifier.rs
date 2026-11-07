@@ -44,23 +44,36 @@ pub fn send_grouped(titles: &[String]) {
 }
 
 /// Send the same grouped notification to ntfy.sh / a self-hosted ntfy server.
+/// `ids` are the series behind `titles`; tapping the push opens mrm-phone
+/// on that series (one) or on the library (several).
 ///
 /// No-op when the `ntfy` feature is disabled, when the title list is empty,
 /// or when no `[notifications.ntfy]` block is configured. Errors are logged
 /// to stderr but never propagated.
 #[cfg(feature = "ntfy")]
-pub async fn send_grouped_remote(notifications: &NotificationsConfig, titles: &[String]) {
+pub async fn send_grouped_remote(notifications: &NotificationsConfig, titles: &[String], ids: &[i64]) {
     if titles.is_empty() {
         return;
     }
     let Some(ntfy_cfg) = notifications.ntfy.as_ref() else { return };
 
     let (summary, body) = build_summary_body(titles);
-    crate::ntfy::dispatch(ntfy_cfg, &summary, &body).await;
+    crate::ntfy::dispatch(ntfy_cfg, &summary, &body, click_url(ids).as_deref()).await;
 }
 
 #[cfg(not(feature = "ntfy"))]
-pub async fn send_grouped_remote(_notifications: &NotificationsConfig, _titles: &[String]) {}
+pub async fn send_grouped_remote(_notifications: &NotificationsConfig, _titles: &[String], _ids: &[i64]) {}
+
+/// ntfy `Click` target for the claimed series: one → its mrm-phone page,
+/// several → the library, none → no click action.
+#[cfg_attr(not(feature = "ntfy"), allow(dead_code))]
+pub(crate) fn click_url(ids: &[i64]) -> Option<String> {
+    match ids {
+        []   => None,
+        [id] => Some(format!("mrmphone://series/{id}")),
+        _    => Some("mrmphone://library".to_string()),
+    }
+}
 
 /// Build the (summary, body) pair shared by every notification backend.
 pub(crate) fn build_summary_body(titles: &[String]) -> (String, String) {
@@ -115,6 +128,13 @@ mod tests {
         assert_eq!(s, "10 manhwa updated");
         assert!(b.ends_with("…and 2 more"));
         assert_eq!(b.matches('•').count(), 8);
+    }
+
+    #[test]
+    fn click_opens_the_series_or_the_library() {
+        assert_eq!(click_url(&[]), None);
+        assert_eq!(click_url(&[42]).as_deref(), Some("mrmphone://series/42"));
+        assert_eq!(click_url(&[1, 2]).as_deref(), Some("mrmphone://library"));
     }
 
     fn notif(ntfy: Option<crate::config::NtfyConfig>) -> NotificationsConfig {

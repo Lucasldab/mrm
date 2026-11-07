@@ -428,13 +428,13 @@ pub async fn record_poll_failure(pool: &PgPool, manhwa_id: i64, err: &str) -> Re
 }
 
 /// Claim every chapter no notifying poller has announced yet, in one statement
-/// (row locks make concurrent claims disjoint). Returns (title, count) for the
+/// (row locks make concurrent claims disjoint). Returns (series id, title, count) for the
 /// claimed chapters the user has not started; started/read ones are claimed
 /// silently. Only notifying pollers call this - never the TUI's quiet poller.
 /// Claim precedes the push: a failed push is not retried (at-most-once).
 /// Rows are locked in id order and locked ones skipped, so a concurrent poll
 /// transaction cannot deadlock with the claim.
-pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<(String, i64)>> {
+pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<Claimed>> {
     let rows = sqlx::query(
         r#"
         WITH c AS (
@@ -445,7 +445,7 @@ pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<(String, i64)>> {
             FROM c WHERE chapter.id = c.id
             RETURNING chapter.id, chapter.manhwa_id
         )
-        SELECT m.title, COUNT(*) AS n
+        SELECT m.id, m.title, COUNT(*) AS n
         FROM claimed c
         JOIN manhwa m ON m.id = c.manhwa_id
         WHERE NOT EXISTS (SELECT 1 FROM progress p WHERE p.chapter_id = c.id)
@@ -456,8 +456,16 @@ pub async fn claim_unnotified(pool: &PgPool) -> Result<Vec<(String, i64)>> {
     .fetch_all(pool)
     .await?;
     rows.iter()
-        .map(|r| Ok((r.try_get("title")?, r.try_get("n")?)))
+        .map(|r| Ok(Claimed { manhwa_id: r.try_get("id")?, title: r.try_get("title")?, chapters: r.try_get("n")? }))
         .collect()
+}
+
+/// One series with freshly claimed, unstarted chapters (see [`claim_unnotified`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimed {
+    pub manhwa_id: i64,
+    pub title:     String,
+    pub chapters:  i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,7 +1062,7 @@ pub(crate) mod tests {
         s.chapters.push(ch(4.0, "https://x/q"));
         s.chapters.push(ch(4.5, "https://x/q"));
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
-        assert_eq!(claim_unnotified(&pool).await.unwrap(), vec![(s.title.clone(), 2)]);
+        assert_eq!(claim_unnotified(&pool).await.unwrap(), vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 2 }]);
         assert!(claim_unnotified(&pool).await.unwrap().is_empty());
     }
 
@@ -1066,7 +1074,7 @@ pub(crate) mod tests {
         for n in 2..=21 { s.chapters.push(ch(n as f64, "https://x/r")); }
         apply_poll_result(&pool, id, &s, "ongoing").await.unwrap();
         let (a, b) = tokio::join!(claim_unnotified(&pool), claim_unnotified(&pool));
-        let total: i64 = a.unwrap().iter().chain(b.unwrap().iter()).map(|(_, n)| n).sum();
+        let total: i64 = a.unwrap().iter().chain(b.unwrap().iter()).map(|c| c.chapters).sum();
         assert_eq!(total, 20);
     }
 
@@ -1085,10 +1093,10 @@ pub(crate) mod tests {
             .bind(id).fetch_one(&mut *tx).await.unwrap();
         let got = tokio::time::timeout(std::time::Duration::from_secs(5), claim_unnotified(&pool))
             .await.expect("claim must not block on locked rows").unwrap();
-        assert_eq!(got, vec![(s.title.clone(), 1)]);
+        assert_eq!(got, vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 1 }]);
         tx.rollback().await.unwrap();
         let again = claim_unnotified(&pool).await.unwrap();
-        assert_eq!(again, vec![(s.title.clone(), 1)], "skipped row {locked} is claimed next time");
+        assert_eq!(again, vec![Claimed { manhwa_id: id, title: s.title.clone(), chapters: 1 }], "skipped row {locked} is claimed next time");
     }
 
     #[tokio::test]
