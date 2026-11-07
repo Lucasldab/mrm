@@ -68,10 +68,8 @@ pub async fn coordinator_task(
     quiet: bool,
 ) {
     let period = Duration::from_secs(config.notifications.poll_interval_minutes.max(1) * 60);
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + FIRST_POLL_DELAY,
-        period,
-    );
+    let mut interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + FIRST_POLL_DELAY, period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -133,7 +131,9 @@ impl SourceStreaks {
 
     /// True once `source` has failed `SOURCE_FAILURE_LIMIT` times in a row.
     pub(crate) fn skip(&self, source: &str) -> bool {
-        self.0.get(source).is_some_and(|&n| n >= SOURCE_FAILURE_LIMIT)
+        self.0
+            .get(source)
+            .is_some_and(|&n| n >= SOURCE_FAILURE_LIMIT)
     }
 }
 
@@ -163,14 +163,20 @@ async fn poll_all(
         let scraper = match registry.get(manhwa.source.as_str()) {
             Some(s) => s,
             None => {
-                log!("mrm: no scraper for source '{}', skipping '{}'",
-                     manhwa.source, manhwa.title);
+                log!(
+                    "mrm: no scraper for source '{}', skipping '{}'",
+                    manhwa.source,
+                    manhwa.title
+                );
                 continue;
             }
         };
         if streaks.skip(&manhwa.source) {
-            log!("mrm: skipping '{}': {} failed {SOURCE_FAILURE_LIMIT} times in a row this poll",
-                 manhwa.title, manhwa.source);
+            log!(
+                "mrm: skipping '{}': {} failed {SOURCE_FAILURE_LIMIT} times in a row this poll",
+                manhwa.title,
+                manhwa.source
+            );
             continue;
         }
 
@@ -193,28 +199,34 @@ async fn poll_all(
                 match db::record_poll_failure(pool, manhwa.id, &msg).await {
                     // Reload the TUI only when the ⚠ appears or its text
                     // changes, not on every poll of a series that stays down.
-                    Ok(()) => health_changed |= manhwa.failing_since.is_none()
-                        || manhwa.last_error.as_deref() != Some(msg.as_str()),
-                    Err(db_err) => log!("mrm: could not record failure for '{}': {db_err}", manhwa.title),
+                    Ok(()) => {
+                        health_changed |= manhwa.failing_since.is_none()
+                            || manhwa.last_error.as_deref() != Some(msg.as_str())
+                    }
+                    Err(db_err) => log!(
+                        "mrm: could not record failure for '{}': {db_err}",
+                        manhwa.title
+                    ),
                 }
                 continue;
             }
         };
         streaks.succeeded(&manhwa.source);
 
-        let new_count = match db::apply_poll_result_noted(pool, manhwa.id, &series, &manhwa.pub_status).await {
-            Ok((n, note)) => {
-                if let Some(note) = &note {
-                    log!("mrm: '{}' chapter conflict: {note}", manhwa.title);
+        let new_count =
+            match db::apply_poll_result_noted(pool, manhwa.id, &series, &manhwa.pub_status).await {
+                Ok((n, note)) => {
+                    if let Some(note) = &note {
+                        log!("mrm: '{}' chapter conflict: {note}", manhwa.title);
+                    }
+                    health_changed |= note != manhwa.chapter_conflict;
+                    n
                 }
-                health_changed |= note != manhwa.chapter_conflict;
-                n
-            }
-            Err(e) => {
-                log!("mrm: poll write error for '{}': {e}", manhwa.title);
-                continue;
-            }
-        };
+                Err(e) => {
+                    log!("mrm: poll write error for '{}': {e}", manhwa.title);
+                    continue;
+                }
+            };
         health_changed |= manhwa.failing_since.is_some();
         if new_count > 0 {
             log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
@@ -246,7 +258,11 @@ async fn poll_all(
     if !updated_titles.is_empty() || health_changed {
         // Signal TUI to refresh library list (empty titles = reload without a
         // banner); ignore send error (TUI may be exiting)
-        let _ = scraper_tx.send(ScraperEvent::NewChapters { titles: updated_titles }).await;
+        let _ = scraper_tx
+            .send(ScraperEvent::NewChapters {
+                titles: updated_titles,
+            })
+            .await;
     }
 
     // Piggyback the discovery pass on the same tick, but gated so it runs at
@@ -259,7 +275,9 @@ async fn poll_all(
         };
         match discovered {
             Ok(count) if count > 0 => {
-                let _ = scraper_tx.send(ScraperEvent::NewDiscoveries { count }).await;
+                let _ = scraper_tx
+                    .send(ScraperEvent::NewDiscoveries { count })
+                    .await;
             }
             Ok(_) => {}
             Err(e) => {
@@ -286,18 +304,14 @@ async fn should_run_discovery(pool: &PgPool) -> bool {
         .map(|d| d.with_timezone(&Utc));
     match last {
         Some(t) => (Utc::now() - t).num_hours() >= DISCOVERY_MIN_INTERVAL_HOURS,
-        None    => true,
+        None => true,
     }
 }
 
 /// Walk every enabled scraper, call latest_chapters(), and upsert any entries
 /// not already in the library into discovered_manhwa. Returns how many new
 /// rows were inserted (existing + dismissed entries don't count).
-async fn run_discovery(
-    pool: &PgPool,
-    registry: &Registry,
-    quiet: bool,
-) -> Result<usize> {
+async fn run_discovery(pool: &PgPool, registry: &Registry, quiet: bool) -> Result<usize> {
     macro_rules! log {
         ($($arg:tt)*) => { if !quiet { eprintln!($($arg)*); } };
     }
@@ -324,21 +338,20 @@ async fn run_discovery(
                 entry.cover_url.as_deref(),
                 entry.chapter_number,
                 entry.released_at.as_deref(),
-            ).await {
-                Ok(true)  => new_count += 1,
+            )
+            .await
+            {
+                Ok(true) => new_count += 1,
                 Ok(false) => {}
-                Err(e)    => log!("mrm: discovery upsert error: {e}"),
+                Err(e) => log!("mrm: discovery upsert error: {e}"),
             }
         }
     }
 
     // Record the poll timestamp even if nothing new — otherwise we'd retry on
     // the very next coordinator tick.
-    if let Err(e) = db::set_discovery_meta(
-        pool,
-        DISCOVERY_META_KEY,
-        &Utc::now().to_rfc3339(),
-    ).await {
+    if let Err(e) = db::set_discovery_meta(pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339()).await
+    {
         log!("mrm: discovery meta write failed: {e}");
     }
 
@@ -359,20 +372,29 @@ mod tests {
 
     #[async_trait]
     impl Scraper for HangingScraper {
-        fn source_name(&self) -> &'static str { "hang" }
-        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> { Ok(vec![]) }
+        fn source_name(&self) -> &'static str {
+            "hang"
+        }
+        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
         async fn get_series(&self, _url: &str) -> Result<SeriesData> {
             self.0.notify_one();
             std::future::pending().await
         }
-        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> { Ok(vec![]) }
-        async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> { Ok(vec![]) }
+        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn latest_chapters(&self) -> Result<Vec<DiscoveryEntry>> {
+            Ok(vec![])
+        }
     }
 
     fn test_config() -> Config {
         crate::config::parse_config(
             "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n",
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -381,7 +403,9 @@ mod tests {
             eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
             return;
         };
-        db::insert_manhwa_with_chapters(&pool, &series(1, "https://x/hang"), "hang").await.unwrap();
+        db::insert_manhwa_with_chapters(&pool, &series(1, "https://x/hang"), "hang")
+            .await
+            .unwrap();
 
         let entered = Arc::new(Notify::new());
         let mut reg: Registry = Registry::new();
@@ -391,7 +415,13 @@ mod tests {
         let poll_now = Arc::new(Notify::new());
         let (tx, _rx) = mpsc::channel(4);
         let handle = tokio::spawn(coordinator_task(
-            pool, test_config(), Arc::new(reg), shutdown.clone(), poll_now.clone(), tx, true,
+            pool,
+            test_config(),
+            Arc::new(reg),
+            shutdown.clone(),
+            poll_now.clone(),
+            tx,
+            true,
         ));
 
         // Neither the 30-minute interval nor the first-poll delay has elapsed:
@@ -413,22 +443,32 @@ mod tests {
 
     #[async_trait]
     impl Scraper for FailingScraper {
-        fn source_name(&self) -> &'static str { "dead" }
-        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> { Ok(vec![]) }
+        fn source_name(&self) -> &'static str {
+            "dead"
+        }
+        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
         async fn get_series(&self, _url: &str) -> Result<SeriesData> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(anyhow::anyhow!("HTTP 403"))
         }
-        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> { Ok(vec![]) }
+        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
     }
 
     #[test]
     fn a_source_is_benched_after_three_consecutive_failures() {
         let mut streaks = SourceStreaks::default();
-        for _ in 0..2 { streaks.failed("a"); }
+        for _ in 0..2 {
+            streaks.failed("a");
+        }
         assert!(!streaks.skip("a"));
         streaks.succeeded("a");
-        for _ in 0..2 { streaks.failed("a"); }
+        for _ in 0..2 {
+            streaks.failed("a");
+        }
         assert!(!streaks.skip("a"), "a success resets the streak");
         streaks.failed("a");
         assert!(streaks.skip("a"));
@@ -442,26 +482,56 @@ mod tests {
             return;
         };
         for i in 0..5 {
-            db::insert_manhwa_with_chapters(&pool, &series(1, &format!("https://x/dead{i}")), "dead").await.unwrap();
+            db::insert_manhwa_with_chapters(
+                &pool,
+                &series(1, &format!("https://x/dead{i}")),
+                "dead",
+            )
+            .await
+            .unwrap();
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut reg: Registry = Registry::new();
         reg.insert("dead", Box::new(FailingScraper(calls.clone())));
         // Discovery is not due: keep this test to the chapter poll.
-        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339()).await.unwrap();
+        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339())
+            .await
+            .unwrap();
 
         let (tx, mut rx) = mpsc::channel(4);
-        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
+        poll_all(
+            &pool,
+            &test_config(),
+            &reg,
+            &CancellationToken::new(),
+            &tx,
+            true,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), SOURCE_FAILURE_LIMIT);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            SOURCE_FAILURE_LIMIT
+        );
         match rx.try_recv() {
             Ok(ScraperEvent::NewChapters { titles }) => assert!(titles.is_empty()),
             other => panic!("TUI was not told to reload for the ⚠ markers: {other:?}"),
         }
-        let failing: Vec<_> = db::fetch_all_manhwa(&pool).await.unwrap()
-            .into_iter().filter(|m| m.failing_since.is_some()).collect();
-        assert_eq!(failing.len(), SOURCE_FAILURE_LIMIT, "skipped series are not marked failing");
-        assert!(failing.iter().all(|m| m.last_error.as_deref() == Some("HTTP 403")));
+        let failing: Vec<_> = db::fetch_all_manhwa(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.failing_since.is_some())
+            .collect();
+        assert_eq!(
+            failing.len(),
+            SOURCE_FAILURE_LIMIT,
+            "skipped series are not marked failing"
+        );
+        assert!(failing
+            .iter()
+            .all(|m| m.last_error.as_deref() == Some("HTTP 403")));
     }
 
     #[tokio::test]
@@ -470,16 +540,44 @@ mod tests {
             eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
             return;
         };
-        db::insert_manhwa_with_chapters(&pool, &series(1, "https://x/dead"), "dead").await.unwrap();
+        db::insert_manhwa_with_chapters(&pool, &series(1, "https://x/dead"), "dead")
+            .await
+            .unwrap();
         let mut reg: Registry = Registry::new();
-        reg.insert("dead", Box::new(FailingScraper(Arc::new(Default::default()))));
-        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339()).await.unwrap();
+        reg.insert(
+            "dead",
+            Box::new(FailingScraper(Arc::new(Default::default()))),
+        );
+        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339())
+            .await
+            .unwrap();
 
         let (tx, mut rx) = mpsc::channel(4);
-        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
+        poll_all(
+            &pool,
+            &test_config(),
+            &reg,
+            &CancellationToken::new(),
+            &tx,
+            true,
+        )
+        .await
+        .unwrap();
         assert!(rx.try_recv().is_ok(), "the first failure shows the ⚠");
-        poll_all(&pool, &test_config(), &reg, &CancellationToken::new(), &tx, true).await.unwrap();
-        assert!(rx.try_recv().is_err(), "same error again: nothing changed for the TUI");
+        poll_all(
+            &pool,
+            &test_config(),
+            &reg,
+            &CancellationToken::new(),
+            &tx,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "same error again: nothing changed for the TUI"
+        );
     }
 
     #[tokio::test]

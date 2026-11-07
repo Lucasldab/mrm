@@ -9,29 +9,29 @@ use ratatui_image::StatefulImage;
 use crate::app::{search_result_id, App};
 
 // Same cell geometry as library/discover so covers render identically.
-const CELL_WIDTH:  u16 = 22;
+const CELL_WIDTH: u16 = 22;
 const CELL_HEIGHT: u16 = 16;
-const IMG_WIDTH:   u16 = 18;
-const IMG_HEIGHT:  u16 = 12;
+const IMG_WIDTH: u16 = 18;
+const IMG_HEIGHT: u16 = 12;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let theme_accent = app.theme.accent();
-    let theme_text   = app.theme.text();
+    let theme_text = app.theme.text();
     let theme_bar_fg = app.theme.bar_fg();
     let theme_bar_bg = app.theme.bar_bg();
-    let theme_error  = app.theme.error();
+    let theme_error = app.theme.error();
 
     let error_height = if app.add_search_error.is_some() { 1 } else { 0 };
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),           // input box
-            Constraint::Length(1),           // results-count title
-            Constraint::Min(0),              // grid
+            Constraint::Length(3), // input box
+            Constraint::Length(1), // results-count title
+            Constraint::Min(0),    // grid
             Constraint::Length(error_height),
-            Constraint::Length(1),           // status bar
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -41,7 +41,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         Style::default().fg(theme_text)
     };
-    let cursor = if app.add_search_input_active { "█" } else { "" };
+    let cursor = if app.add_search_input_active {
+        "█"
+    } else {
+        ""
+    };
     let input_text = format!(" {}{}", app.add_search_query, cursor);
     let input_title = if app.add_search_loading {
         " Search (loading...) "
@@ -63,8 +67,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // --- Results count line ---
     let count_text = format!(" Results ({})", app.add_search_results.len());
     f.render_widget(
-        Paragraph::new(count_text)
-            .style(Style::default().fg(app.theme.text_bold()).add_modifier(Modifier::BOLD)),
+        Paragraph::new(count_text).style(
+            Style::default()
+                .fg(app.theme.text_bold())
+                .add_modifier(Modifier::BOLD),
+        ),
         rows[1],
     );
 
@@ -74,8 +81,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // --- Error line ---
     if let Some(err) = app.add_search_error.clone() {
         f.render_widget(
-            Paragraph::new(format!(" {}", err))
-                .style(Style::default().fg(theme_error)),
+            Paragraph::new(format!(" {}", err)).style(Style::default().fg(theme_error)),
             rows[3],
         );
     }
@@ -95,8 +101,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         )
     };
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(theme_bar_fg).bg(theme_bar_bg)),
+        Paragraph::new(hint).style(Style::default().fg(theme_bar_fg).bg(theme_bar_bg)),
         rows[4],
     );
 }
@@ -152,7 +157,9 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
         let data_row = scroll_row + vis_row;
         for col in 0..grid_cols {
             let idx = data_row * grid_cols + col;
-            if idx >= total { break; }
+            if idx >= total {
+                break;
+            }
 
             let cell_x = area.x + (col as u16) * CELL_WIDTH;
             let cell_y = area.y + (vis_row as u16) * CELL_HEIGHT;
@@ -180,7 +187,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
     };
     let (cache_id, title, cover_url, source, pub_status) = entry;
 
-    if area.width < 4 || area.height < 4 { return; }
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
 
     if is_selected {
         let border = Block::default()
@@ -191,13 +200,17 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
 
     let content = if is_selected {
         Rect::new(
-            area.x + 1, area.y + 1,
-            area.width.saturating_sub(2), area.height.saturating_sub(2),
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
         )
     } else {
         area
     };
-    if content.width < 3 || content.height < 4 { return; }
+    if content.width < 3 || content.height < 4 {
+        return;
+    }
 
     let img_w = IMG_WIDTH.min(content.width);
     let img_h = IMG_HEIGHT.min(content.height.saturating_sub(2));
@@ -221,7 +234,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
 }
 
 fn render_cover(f: &mut Frame, app: &mut App, area: Rect, cache_id: i64, cover_url: Option<&str>) {
-    if area.width == 0 || area.height == 0 { return; }
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     app.search_cover_cache.ensure_loaded(cache_id, cover_url);
     if let Some(protocol) = app.get_search_cover_protocol(cache_id) {
         let image_widget = StatefulImage::default();
@@ -234,20 +249,36 @@ fn render_cover(f: &mut Frame, app: &mut App, area: Rect, cache_id: i64, cover_u
     f.render_widget(placeholder, area);
 }
 
-fn render_title(f: &mut Frame, area: Rect, title: &str, selected: bool, theme: &crate::config::ThemeConfig) {
+fn render_title(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    selected: bool,
+    theme: &crate::config::ThemeConfig,
+) {
     let display = truncate(title, area.width as usize);
     let style = if selected {
-        Style::default().fg(theme.text_bold()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.text_bold())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text())
     };
     f.render_widget(
-        Paragraph::new(display).style(style).alignment(Alignment::Center),
+        Paragraph::new(display)
+            .style(style)
+            .alignment(Alignment::Center),
         area,
     );
 }
 
-fn render_meta(f: &mut Frame, area: Rect, source: &str, pub_status: &str, theme: &crate::config::ThemeConfig) {
+fn render_meta(
+    f: &mut Frame,
+    area: Rect,
+    source: &str,
+    pub_status: &str,
+    theme: &crate::config::ThemeConfig,
+) {
     let text = if pub_status.is_empty() {
         format!("[{source}]")
     } else {
@@ -263,9 +294,13 @@ fn render_meta(f: &mut Frame, area: Rect, source: &str, pub_status: &str, theme:
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 { return String::new(); }
+    if max_chars == 0 {
+        return String::new();
+    }
     let n = s.chars().count();
-    if n <= max_chars { return s.to_string(); }
+    if n <= max_chars {
+        return s.to_string();
+    }
     let t: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{t}…")
 }

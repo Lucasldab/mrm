@@ -9,10 +9,10 @@ use ratatui_image::StatefulImage;
 use crate::app::App;
 
 // Same cell geometry as library grid so covers render identically.
-const CELL_WIDTH:  u16 = 22;
+const CELL_WIDTH: u16 = 22;
 const CELL_HEIGHT: u16 = 16;
-const IMG_WIDTH:   u16 = 18;
-const IMG_HEIGHT:  u16 = 12;
+const IMG_WIDTH: u16 = 18;
+const IMG_HEIGHT: u16 = 12;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -35,11 +35,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let title = format!(
         " Discover — {} new manhwa {}",
         app.discoveries.len(),
-        if app.discover_adding { "(adding...)" } else { "" },
+        if app.discover_adding {
+            "(adding...)"
+        } else {
+            ""
+        },
     );
     f.render_widget(
-        Paragraph::new(title)
-            .style(Style::default().fg(theme_text_bold).add_modifier(Modifier::BOLD)),
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(theme_text_bold)
+                .add_modifier(Modifier::BOLD),
+        ),
         rows[0],
     );
 
@@ -47,8 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if let Some(err) = app.discover_error.clone() {
         f.render_widget(
-            Paragraph::new(format!(" {err}"))
-                .style(Style::default().fg(theme_error)),
+            Paragraph::new(format!(" {err}")).style(Style::default().fg(theme_error)),
             rows[2],
         );
     }
@@ -59,9 +65,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         keys.left, keys.right, keys.down, keys.up, keys.open, keys.back,
     );
     f.render_widget(
-        Paragraph::new(hint).style(
-            Style::default().fg(theme_bar_fg).bg(theme_bar_bg),
-        ),
+        Paragraph::new(hint).style(Style::default().fg(theme_bar_fg).bg(theme_bar_bg)),
         rows[3],
     );
 
@@ -113,7 +117,9 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
         let data_row = scroll_row + vis_row;
         for col in 0..grid_cols {
             let idx = data_row * grid_cols + col;
-            if idx >= total { break; }
+            if idx >= total {
+                break;
+            }
 
             let cell_x = area.x + (col as u16) * CELL_WIDTH;
             let cell_y = area.y + (vis_row as u16) * CELL_HEIGHT;
@@ -141,7 +147,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
     };
     let (disc_id, title, cover_url, chapter_number, source) = entry;
 
-    if area.width < 4 || area.height < 4 { return; }
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
 
     if is_selected {
         let border = Block::default()
@@ -151,11 +159,18 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
     }
 
     let content = if is_selected {
-        Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
+        Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        )
     } else {
         area
     };
-    if content.width < 3 || content.height < 4 { return; }
+    if content.width < 3 || content.height < 4 {
+        return;
+    }
 
     let img_w = IMG_WIDTH.min(content.width);
     let img_h = IMG_HEIGHT.min(content.height.saturating_sub(2));
@@ -179,7 +194,9 @@ fn draw_cell(f: &mut Frame, app: &mut App, area: Rect, idx: usize, is_selected: 
 }
 
 fn render_cover(f: &mut Frame, app: &mut App, area: Rect, disc_id: i64, cover_url: Option<&str>) {
-    if area.width == 0 || area.height == 0 { return; }
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     app.discover_cover_cache.ensure_loaded(disc_id, cover_url);
     if let Some(protocol) = app.get_discover_cover_protocol(disc_id) {
         let image_widget = StatefulImage::default();
@@ -192,22 +209,44 @@ fn render_cover(f: &mut Frame, app: &mut App, area: Rect, disc_id: i64, cover_ur
     f.render_widget(placeholder, area);
 }
 
-fn render_title(f: &mut Frame, area: Rect, title: &str, selected: bool, theme: &crate::config::ThemeConfig) {
+fn render_title(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    selected: bool,
+    theme: &crate::config::ThemeConfig,
+) {
     let display = truncate(title, area.width as usize);
     let style = if selected {
-        Style::default().fg(theme.text_bold()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.text_bold())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text())
     };
     f.render_widget(
-        Paragraph::new(display).style(style).alignment(Alignment::Center),
+        Paragraph::new(display)
+            .style(style)
+            .alignment(Alignment::Center),
         area,
     );
 }
 
-fn render_meta(f: &mut Frame, area: Rect, source: &str, chapter_number: Option<f64>, theme: &crate::config::ThemeConfig) {
+fn render_meta(
+    f: &mut Frame,
+    area: Rect,
+    source: &str,
+    chapter_number: Option<f64>,
+    theme: &crate::config::ThemeConfig,
+) {
     let ch = chapter_number
-        .map(|n| if n.fract() == 0.0 { format!("ch.{n:.0}") } else { format!("ch.{n}") })
+        .map(|n| {
+            if n.fract() == 0.0 {
+                format!("ch.{n:.0}")
+            } else {
+                format!("ch.{n}")
+            }
+        })
         .unwrap_or_default();
     let text = if ch.is_empty() {
         format!("[{source}]")
@@ -224,9 +263,13 @@ fn render_meta(f: &mut Frame, area: Rect, source: &str, chapter_number: Option<f
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 { return String::new(); }
+    if max_chars == 0 {
+        return String::new();
+    }
     let n = s.chars().count();
-    if n <= max_chars { return s.to_string(); }
+    if n <= max_chars {
+        return s.to_string();
+    }
     let t: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{t}…")
 }

@@ -9,12 +9,11 @@ use ratatui_image::StatefulImage;
 
 use crate::app::App;
 
-
 // Each grid cell: cover image + title + status line
-const CELL_WIDTH: u16 = 22;  // columns per cell
+const CELL_WIDTH: u16 = 22; // columns per cell
 const CELL_HEIGHT: u16 = 16; // rows per cell (image area + 2 text lines)
-const IMG_WIDTH: u16 = 18;   // image width within cell (centered)
-const IMG_HEIGHT: u16 = 12;  // fixed image height
+const IMG_WIDTH: u16 = 18; // image width within cell (centered)
+const IMG_HEIGHT: u16 = 12; // fixed image height
 
 /// Everything a grid cell needs, copied out once per frame so drawing never
 /// re-runs the filter + sort and doesn't hold a borrow on `app`.
@@ -31,15 +30,19 @@ struct CellData {
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let cells: Vec<CellData> = app.visible_manhwa().into_iter().map(|m| CellData {
-        id: m.id,
-        title: m.title.clone(),
-        cover_url: m.cover_url.clone(),
-        status: m.status.clone(),
-        unread: m.unread,
-        status_display: m.status_display(),
-        failing: m.failing_since.is_some() || m.chapter_conflict.is_some(),
-    }).collect();
+    let cells: Vec<CellData> = app
+        .visible_manhwa()
+        .into_iter()
+        .map(|m| CellData {
+            id: m.id,
+            title: m.title.clone(),
+            cover_url: m.cover_url.clone(),
+            status: m.status.clone(),
+            unread: m.unread,
+            status_display: m.status_display(),
+            failing: m.failing_since.is_some() || m.chapter_conflict.is_some(),
+        })
+        .collect();
 
     // Split: main grid | right sidebar (keybinds)
     let cols = Layout::default()
@@ -48,7 +51,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .split(area);
 
     // Split left: search bar (if active) | grid | status bar
-    let search_height = if app.search_active || !app.search_query.is_empty() { 3 } else { 0 };
+    let search_height = if app.search_active || !app.search_query.is_empty() {
+        3
+    } else {
+        0
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -74,8 +81,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         format!(" mrm — {} results ", cells.len())
     };
-    let title_bar = Paragraph::new(title)
-        .style(Style::default().fg(app.theme.text_bold()).add_modifier(Modifier::BOLD));
+    let title_bar = Paragraph::new(title).style(
+        Style::default()
+            .fg(app.theme.text_bold())
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(title_bar, rows[1]);
 
     // Grid area
@@ -158,7 +168,15 @@ fn draw_grid(f: &mut Frame, app: &mut App, cells: &[CellData], area: Rect) {
 }
 
 fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selected: bool) {
-    let CellData { id: manhwa_id, title, cover_url, status, unread, status_display, failing } = cell;
+    let CellData {
+        id: manhwa_id,
+        title,
+        cover_url,
+        status,
+        unread,
+        status_display,
+        failing,
+    } = cell;
     let (manhwa_id, unread, failing) = (*manhwa_id, *unread, *failing);
 
     if area.width < 4 || area.height < 4 {
@@ -175,11 +193,18 @@ fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selec
 
     // Content area (inside border for selected, full area for unselected)
     let content = if is_selected {
-        Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
+        Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        )
     } else {
         area
     };
-    if content.width < 3 || content.height < 4 { return; }
+    if content.width < 3 || content.height < 4 {
+        return;
+    }
 
     // Center image horizontally within content
     let img_w = IMG_WIDTH.min(content.width);
@@ -200,7 +225,15 @@ fn draw_cell(f: &mut Frame, app: &mut App, cell: &CellData, area: Rect, is_selec
     render_cover(f, app, img_area, manhwa_id, cover_url.as_deref());
     render_title_text(f, txt_area, title, is_selected, &app.theme);
     if sts_area.width > 0 {
-        render_status_line(f, sts_area, status, unread, status_display, failing, &app.theme);
+        render_status_line(
+            f,
+            sts_area,
+            status,
+            unread,
+            status_display,
+            failing,
+            &app.theme,
+        );
     }
 }
 
@@ -225,7 +258,9 @@ fn render_cover(f: &mut Frame, app: &mut App, area: Rect, manhwa_id: i64, cover_
 
 /// Truncate a string to fit within `max_chars` display columns, appending "…" if needed.
 fn truncate_str(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 { return String::new(); }
+    if max_chars == 0 {
+        return String::new();
+    }
     let char_count: usize = s.chars().count();
     if char_count <= max_chars {
         s.to_string()
@@ -235,11 +270,19 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn render_title_text(f: &mut Frame, area: Rect, title: &str, selected: bool, theme: &crate::config::ThemeConfig) {
+fn render_title_text(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    selected: bool,
+    theme: &crate::config::ThemeConfig,
+) {
     let display = truncate_str(title, area.width as usize);
 
     let style = if selected {
-        Style::default().fg(theme.text_bold()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.text_bold())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text())
     };
@@ -258,7 +301,11 @@ fn status_text(unread: u32, status_display: &str, failing: bool) -> String {
     } else {
         status_display.to_string()
     };
-    if failing { format!("⚠ {base}") } else { base }
+    if failing {
+        format!("⚠ {base}")
+    } else {
+        base
+    }
 }
 
 fn render_status_line(
@@ -271,7 +318,10 @@ fn render_status_line(
     theme: &crate::config::ThemeConfig,
 ) {
     let status_color = theme.status_color(status);
-    let text = truncate_str(&status_text(unread, status_display, failing), area.width as usize);
+    let text = truncate_str(
+        &status_text(unread, status_display, failing),
+        area.width as usize,
+    );
 
     // The marker in the warning colour, the rest in the status colour.
     let line = match text.strip_prefix("⚠ ") {
@@ -291,8 +341,15 @@ fn render_status_line(
 pub(crate) fn library_hint(keys: &crate::config::KeysConfig) -> String {
     format!(
         "{}/{} move  {}/{} row  {} open  {} search  {} add  D discover  {} delete  {} poll  q quit",
-        keys.left, keys.right, keys.down, keys.up, keys.open, keys.search,
-        keys.add, keys.delete, keys.poll_now,
+        keys.left,
+        keys.right,
+        keys.down,
+        keys.up,
+        keys.open,
+        keys.search,
+        keys.add,
+        keys.delete,
+        keys.poll_now,
     )
 }
 
@@ -315,7 +372,10 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
 
     let key_style = Style::default().fg(accent);
     let lines = vec![
-        Line::from(Span::styled(" Navigation", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " Navigation",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(format!(" {}/←  ", keys.left), key_style),
@@ -346,7 +406,10 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" open"),
         ]),
         Line::from(""),
-        Line::from(Span::styled(" Library", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " Library",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(format!(" {}    ", keys.search), key_style),
@@ -372,10 +435,7 @@ fn draw_keybinds(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!(" {}    ", keys.poll_now), key_style),
             Span::raw("poll sources now"),
         ]),
-        Line::from(vec![
-            Span::styled(" q    ", key_style),
-            Span::raw("quit"),
-        ]),
+        Line::from(vec![Span::styled(" q    ", key_style), Span::raw("quit")]),
     ];
 
     let block = Block::default()
@@ -391,7 +451,8 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let area = f.area();
     let popup = centered_rect(50, 25, area);
 
-    let title = app.confirm_delete_id
+    let title = app
+        .confirm_delete_id
         .and_then(|id| app.manhwa_list.iter().find(|m| m.id == id))
         .map(|m| m.title.as_str())
         .unwrap_or("this manhwa");
@@ -454,8 +515,15 @@ mod tests {
             library_hint(&keys),
             "h/l move  j/k row  Enter open  / search  a add  D discover  d delete  p poll  q quit",
         );
-        let rebound = crate::config::KeysConfig { poll_now: "P".into(), left: "n".into(), ..keys };
+        let rebound = crate::config::KeysConfig {
+            poll_now: "P".into(),
+            left: "n".into(),
+            ..keys
+        };
         let hint = library_hint(&rebound);
-        assert!(hint.starts_with("n/l move") && hint.contains("P poll"), "{hint}");
+        assert!(
+            hint.starts_with("n/l move") && hint.contains("P poll"),
+            "{hint}"
+        );
     }
 }

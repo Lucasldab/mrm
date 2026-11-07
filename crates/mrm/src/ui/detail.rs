@@ -13,10 +13,14 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let manhwa = match &app.current_manhwa {
         Some(m) => m,
-        None    => return,
+        None => return,
     };
 
-    let has_desc = manhwa.description.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let has_desc = manhwa
+        .description
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
 
     // Reserve a description panel only when the source provided one. Some
     // series simply have no synopsis and we hide the block entirely so the
@@ -49,7 +53,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let status_color = theme.status_color(&manhwa.status);
 
     let read_count = app.chapter_list.iter().filter(|c| c.completed).count();
-    let total      = app.chapter_list.len();
+    let total = app.chapter_list.len();
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -87,11 +91,20 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             },
         ]),
     ];
-    if let Some(health) = health_line(manhwa.failing_since.as_deref(), manhwa.last_error.as_deref()) {
-        lines.push(Line::from(Span::styled(format!("  {health}"), Style::default().fg(theme.error()))));
+    if let Some(health) = health_line(
+        manhwa.failing_since.as_deref(),
+        manhwa.last_error.as_deref(),
+    ) {
+        lines.push(Line::from(Span::styled(
+            format!("  {health}"),
+            Style::default().fg(theme.error()),
+        )));
     }
     if let Some(conflict) = conflict_line(manhwa.chapter_conflict.as_deref()) {
-        lines.push(Line::from(Span::styled(format!("  {conflict}"), Style::default().fg(theme.error()))));
+        lines.push(Line::from(Span::styled(
+            format!("  {conflict}"),
+            Style::default().fg(theme.error()),
+        )));
     }
 
     let block = Block::default()
@@ -205,17 +218,28 @@ fn draw_chapters(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let keys = &app.keys;
-    let override_hint = if app.current_manhwa.as_ref().map(|m| m.status_override).unwrap_or(false) {
+    let override_hint = if app
+        .current_manhwa
+        .as_ref()
+        .map(|m| m.status_override)
+        .unwrap_or(false)
+    {
         format!("  {} clear override", keys.clear_override)
     } else {
         String::new()
     };
     let default_hint = format!(
         "{}/{} move  {} read  {} status  {} unread  {} mark read  R refresh{}  Esc back",
-        keys.down, keys.up, keys.open, keys.set_status, keys.mark_unread, keys.mark_read, override_hint
+        keys.down,
+        keys.up,
+        keys.open,
+        keys.set_status,
+        keys.mark_unread,
+        keys.mark_read,
+        override_hint
     );
-    let refreshing = app.refreshing.is_some()
-        && app.refreshing == app.current_manhwa.as_ref().map(|m| m.id);
+    let refreshing =
+        app.refreshing.is_some() && app.refreshing == app.current_manhwa.as_ref().map(|m| m.id);
     let msg = match app.status_msg.as_deref() {
         Some(m) => m,
         None if refreshing => "Refreshing from source...",
@@ -223,7 +247,9 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let bar = Paragraph::new(msg.to_owned()).style(
-        Style::default().fg(app.theme.bar_fg()).bg(app.theme.bar_bg()),
+        Style::default()
+            .fg(app.theme.bar_fg())
+            .bg(app.theme.bar_bg()),
     );
     f.render_widget(bar, area);
 }
@@ -234,7 +260,10 @@ mod tests {
     fn conflict_line_shows_the_note() {
         assert_eq!(conflict_line(None), None);
         assert_eq!(
-            conflict_line(Some("2 chapters share no. 1 (season reset?): keeping /chapter/x-1")).as_deref(),
+            conflict_line(Some(
+                "2 chapters share no. 1 (season reset?): keeping /chapter/x-1"
+            ))
+            .as_deref(),
             Some("⚠ 2 chapters share no. 1 (season reset?): keeping /chapter/x-1"),
         );
     }

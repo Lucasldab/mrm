@@ -95,9 +95,7 @@ impl CoverCache {
     /// Re-check disk for any manhwa IDs currently mapped to None.
     /// Called after background preload may have finished downloading.
     pub fn reload_from_disk(&mut self, manhwa_list: &[Manhwa]) {
-        self.reload_from_disk_ids(
-            manhwa_list.iter().map(|m| (m.id, m.cover_url.as_deref())),
-        );
+        self.reload_from_disk_ids(manhwa_list.iter().map(|m| (m.id, m.cover_url.as_deref())));
     }
 
     /// Generic variant that works for any (id, cover_url) iterator — used by
@@ -216,7 +214,8 @@ async fn preload_covers_inner(
 /// `.tmp`, so the format must be given explicitly rather than inferred.
 fn write_atomic_jpeg(img: &DynamicImage, path: &Path) -> std::io::Result<()> {
     let tmp = path.with_extension("jpg.tmp");
-    img.save_with_format(&tmp, image::ImageFormat::Jpeg).map_err(std::io::Error::other)?;
+    img.save_with_format(&tmp, image::ImageFormat::Jpeg)
+        .map_err(std::io::Error::other)?;
     std::fs::rename(&tmp, path)
 }
 

@@ -17,11 +17,11 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use std::sync::LazyLock;
 use regex::Regex;
 use scraper::{Html, Selector};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -37,10 +37,10 @@ const DELAY: Duration = Duration::from_millis(500);
 // Status text from <span> on the series page → our canonical pub_status.
 fn map_status(raw: &str) -> Option<&'static str> {
     match raw.trim().to_lowercase().as_str() {
-        "ongoing"     => Some("ongoing"),
-        "hiatus"      => Some("hiatus"),
-        "completed"   => Some("completed"),
-        "dropped"     => Some("ongoing"),
+        "ongoing" => Some("ongoing"),
+        "hiatus" => Some("hiatus"),
+        "completed" => Some("completed"),
+        "dropped" => Some("ongoing"),
         "coming soon" => Some("ongoing"),
         _ => None,
     }
@@ -58,39 +58,40 @@ fn is_nav_label(label: &str) -> bool {
 // Regex / Selector singletons
 // ---------------------------------------------------------------------------
 
-static SEL_COMICS_LINK:   LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href*='/comics/']").unwrap());
-static SEL_H3:            LazyLock<Selector> = LazyLock::new(|| Selector::parse("h3").unwrap());
-static SEL_H1:            LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
-static SEL_IMG:           LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
-static SEL_SPAN:          LazyLock<Selector> = LazyLock::new(|| Selector::parse("span").unwrap());
-static SEL_TRUNCATE_SPAN: LazyLock<Selector> = LazyLock::new(|| Selector::parse("span.truncate").unwrap());
-static SEL_DATE_DIV:      LazyLock<Selector> = LazyLock::new(|| Selector::parse("div.flex-shrink-0").unwrap());
+static SEL_COMICS_LINK: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("a[href*='/comics/']").unwrap());
+static SEL_H3: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h3").unwrap());
+static SEL_H1: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
+static SEL_IMG: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
+static SEL_SPAN: LazyLock<Selector> = LazyLock::new(|| Selector::parse("span").unwrap());
+static SEL_TRUNCATE_SPAN: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("span.truncate").unwrap());
+static SEL_DATE_DIV: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div.flex-shrink-0").unwrap());
 
 static HASH_SUFFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-[0-9a-f]{8}$").unwrap());
-static CHAPTER_PATH_RE: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"^(/comics/[^/]+)/chapter/(\d+(?:\.\d+)?)").unwrap()
-);
-static CHAPTER_NUM_RE: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"/chapter/([\d]+(?:\.[\d]+)?)").unwrap()
-);
+static CHAPTER_PATH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(/comics/[^/]+)/chapter/(\d+(?:\.\d+)?)").unwrap());
+static CHAPTER_NUM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/chapter/([\d]+(?:\.[\d]+)?)").unwrap());
 // Any host: the CDN has been renamed before (L13).
-static IMAGE_URL_RE: LazyLock<Regex> = LazyLock::new(||
+static IMAGE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"https://[^"\s<>]+/chapters/[^"\s<>]+\.(?:webp|jpe?g|png|avif)"#).unwrap()
-);
+});
 
 // Two known serialized chapter-block formats embedded in Astro's HTML-encoded
 // state. Both expose `is_premium` + `early_access_until`; one names the
 // series via `comic_slug`, the other via `series_slug`. We match either.
-static LOCK_RE_A: LazyLock<Regex> = LazyLock::new(||
+static LOCK_RE_A: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^{}]*?comic_slug&quot;:\[0,&quot;(?P<slug>[^&]+)&quot;\][^{}]*?is_premium&quot;:\[0,(?P<prem>true|false)\][^{}]*?early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\]"#
     ).unwrap()
-);
-static LOCK_RE_B: LazyLock<Regex> = LazyLock::new(||
+});
+static LOCK_RE_B: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"number&quot;:\[0,(?P<num>\d+(?:\.\d+)?)\][^{}]*?is_premium&quot;:\[0,(?P<prem>true|false)\][^{}]*?early_access_until&quot;:\[0,(?:&quot;(?P<eau>[^&]+)&quot;|[^\]]+)\][^{}]*?series_slug&quot;:\[0,&quot;(?P<slug>[^&]+)&quot;\]"#
     ).unwrap()
-);
+});
 
 // ---------------------------------------------------------------------------
 // Struct
@@ -115,7 +116,9 @@ impl AsuraScraper {
             .redirect(rquest::redirect::Policy::limited(10))
             .build()
             .expect("rquest Client::build should never fail at startup");
-        Self { client: Arc::new(client) }
+        Self {
+            client: Arc::new(client),
+        }
     }
 }
 
@@ -159,10 +162,13 @@ async fn fetch(client: &rquest::Client, url: &str) -> Result<(String, String)> {
 /// `?query` or `#fragment`.
 fn series_path(source_url: &str) -> String {
     let no_query = source_url.split(['?', '#']).next().unwrap_or(source_url);
-    let after_scheme = no_query.split_once("://").map(|(_, r)| r).unwrap_or(no_query);
+    let after_scheme = no_query
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(no_query);
     let path = match after_scheme.find('/') {
         Some(i) => &after_scheme[i..],
-        None    => "/",
+        None => "/",
     };
     path.trim_end_matches('/').to_string()
 }
@@ -183,12 +189,12 @@ pub(crate) fn slug_key(url: &str) -> String {
 /// Decode HTML entities used by Astro's serialized state (just the subset we
 /// actually encounter on chapter pages; full HTML entity decoding is overkill).
 fn html_unescape(s: &str) -> String {
-    s.replace("&amp;",  "&")
-     .replace("&quot;", "\"")
-     .replace("&#x27;", "'")
-     .replace("&#39;",  "'")
-     .replace("&lt;",   "<")
-     .replace("&gt;",   ">")
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 
 /// Parse a free-form date string into ISO-8601 (YYYY-MM-DD).
@@ -213,15 +219,21 @@ fn parse_locked_chapters(raw_html: &str, path: &str) -> HashSet<u64> {
     for re in [&*LOCK_RE_A, &*LOCK_RE_B] {
         for cap in re.captures_iter(raw_html) {
             let slug = cap.name("slug").map(|m| m.as_str()).unwrap_or("");
-            if slug != target_slug { continue; }
+            if slug != target_slug {
+                continue;
+            }
             let prem = cap.name("prem").map(|m| m.as_str()).unwrap_or("");
-            if prem != "true" { continue; }
-            let eau  = cap.name("eau").map(|m| m.as_str()).unwrap_or("");
-            if eau.is_empty() { continue; }
+            if prem != "true" {
+                continue;
+            }
+            let eau = cap.name("eau").map(|m| m.as_str()).unwrap_or("");
+            if eau.is_empty() {
+                continue;
+            }
             // ISO-8601 → DateTime<Utc>. Tolerate trailing `Z` or `+00:00`.
             let normalized = eau.replace('Z', "+00:00");
             let ts: DateTime<Utc> = match DateTime::parse_from_rfc3339(&normalized) {
-                Ok(t)  => t.with_timezone(&Utc),
+                Ok(t) => t.with_timezone(&Utc),
                 Err(_) => continue,
             };
             if ts > now {
@@ -244,7 +256,9 @@ fn parse_locked_chapters(raw_html: &str, path: &str) -> HashSet<u64> {
 
 #[async_trait]
 impl Scraper for AsuraScraper {
-    fn source_name(&self) -> &'static str { "asura" }
+    fn source_name(&self) -> &'static str {
+        "asura"
+    }
 
     async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         let url = format!("{BASE}/browse?search={}", urlencoding_minimal(query));
@@ -265,8 +279,8 @@ impl Scraper for AsuraScraper {
 
     async fn get_chapter_image_urls(&self, chapter_url: &str) -> Result<Vec<String>> {
         let (_, body) = fetch(&self.client, chapter_url).await?;
-        let out = parse_chapter_images(&body)
-            .with_context(|| format!("Asura chapter {chapter_url}"))?;
+        let out =
+            parse_chapter_images(&body).with_context(|| format!("Asura chapter {chapter_url}"))?;
         sleep(DELAY).await;
         Ok(out)
     }
@@ -293,27 +307,35 @@ fn parse_search(body: &str) -> Vec<SearchResult> {
     for a in tree.select(&SEL_COMICS_LINK) {
         let href = match a.value().attr("href") {
             Some(h) => h.to_string(),
-            None    => continue,
+            None => continue,
         };
-        if href.is_empty() || seen.contains(&href) { continue; }
+        if href.is_empty() || seen.contains(&href) {
+            continue;
+        }
 
         let title = match a.select(&SEL_H3).next() {
             Some(h3) => h3.text().collect::<String>().trim().to_string(),
-            None     => continue,
+            None => continue,
         };
-        if title.is_empty() || title.len() < 2 { continue; }
+        if title.is_empty() || title.len() < 2 {
+            continue;
+        }
         seen.insert(href.clone());
 
         let cover_url = find_cover_near(&a);
 
-        let full = if href.starts_with('/') { format!("{BASE}{href}") } else { href };
+        let full = if href.starts_with('/') {
+            format!("{BASE}{href}")
+        } else {
+            href
+        };
 
         results.push(SearchResult {
             title,
             cover_url,
             source_url: full,
             pub_status: "ongoing".into(),
-            source:     "asura".into(),
+            source: "asura".into(),
         });
     }
     results
@@ -325,7 +347,8 @@ fn parse_search(body: &str) -> Vec<SearchResult> {
 fn parse_chapter_images(body: &str) -> Result<Vec<String>> {
     let decoded = html_unescape(body);
     let mut seen: HashSet<&str> = HashSet::new();
-    let out: Vec<String> = IMAGE_URL_RE.find_iter(&decoded)
+    let out: Vec<String> = IMAGE_URL_RE
+        .find_iter(&decoded)
         .map(|m| m.as_str())
         .filter(|u| seen.insert(u))
         .map(str::to_string)
@@ -343,7 +366,8 @@ fn parse_chapter_images(body: &str) -> Result<Vec<String>> {
 fn parse_series(source_url: &str, final_url: &str, body: &str) -> Result<SeriesData> {
     let tree = Html::parse_document(body);
 
-    let h1 = tree.select(&SEL_H1)
+    let h1 = tree
+        .select(&SEL_H1)
         .find(|h1| !h1.text().collect::<String>().trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("Asura: no <h1> title at {source_url}"))?;
     let title = h1.text().collect::<String>().trim().to_string();
@@ -352,12 +376,15 @@ fn parse_series(source_url: &str, final_url: &str, body: &str) -> Result<SeriesD
 
     // The status nearest the title: the smallest ancestor of the <h1> holding
     // a status word. Filter menus and sidebar cards elsewhere don't count.
-    let status = h1.ancestors()
+    let status = h1
+        .ancestors()
         .filter_map(scraper::ElementRef::wrap)
         .take_while(|el| !matches!(el.value().name(), "body" | "html"))
-        .find_map(|block| block.select(&SEL_SPAN).find_map(|span| {
-            map_status(&span.text().collect::<String>())
-        }))
+        .find_map(|block| {
+            block
+                .select(&SEL_SPAN)
+                .find_map(|span| map_status(&span.text().collect::<String>()))
+        })
         .unwrap_or("ongoing")
         .to_string();
 
@@ -368,7 +395,11 @@ fn parse_series(source_url: &str, final_url: &str, body: &str) -> Result<SeriesD
         anyhow::bail!("Asura: no chapter links for {path} at {source_url}");
     }
     chapters.retain(|c| !locked.contains(&c.number.to_bits()));
-    chapters.sort_by(|a, b| a.number.partial_cmp(&b.number).unwrap_or(std::cmp::Ordering::Equal));
+    chapters.sort_by(|a, b| {
+        a.number
+            .partial_cmp(&b.number)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(SeriesData {
         title,
@@ -389,18 +420,29 @@ fn parse_latest_chapters(body: &str) -> Vec<DiscoveryEntry> {
     for a in tree.select(&SEL_COMICS_LINK) {
         let href = match a.value().attr("href") {
             Some(h) => h,
-            None    => continue,
+            None => continue,
         };
-        if href.contains("/chapter/") { continue; }
-        let path = href.split('?').next().unwrap_or("").trim_end_matches('/').to_string();
-        if !path.starts_with("/comics/") || cards.contains_key(&path) { continue; }
+        if href.contains("/chapter/") {
+            continue;
+        }
+        let path = href
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_string();
+        if !path.starts_with("/comics/") || cards.contains_key(&path) {
+            continue;
+        }
 
         let (img, cover_url) = match cover_img(&a) {
             Some(c) => c,
-            None    => continue,
+            None => continue,
         };
         let title = img.value().attr("alt").unwrap_or("").trim().to_string();
-        if title.is_empty() || title.len() < 2 { continue; }
+        if title.is_empty() || title.len() < 2 {
+            continue;
+        }
         cards.insert(path, (title, Some(cover_url)));
     }
 
@@ -408,33 +450,38 @@ fn parse_latest_chapters(body: &str) -> Vec<DiscoveryEntry> {
     for a in tree.select(&SEL_COMICS_LINK) {
         let href = match a.value().attr("href") {
             Some(h) => h,
-            None    => continue,
+            None => continue,
         };
         let cap = match CHAPTER_PATH_RE.captures(href) {
             Some(c) => c,
-            None    => continue,
+            None => continue,
         };
-        let path = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let path = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let num: f64 = match cap.get(2).map(|m| m.as_str().parse()) {
             Some(Ok(n)) => n,
             _ => continue,
         };
         let entry = latest.entry(path).or_insert(-1.0);
-        if num > *entry { *entry = num; }
+        if num > *entry {
+            *entry = num;
+        }
     }
 
     let mut out = Vec::new();
     for (path, num) in latest {
         let (title, cover) = match cards.get(&path) {
             Some(v) => v.clone(),
-            None    => continue,
+            None => continue,
         };
         out.push(DiscoveryEntry {
             title,
-            cover_url:      cover,
-            source_url:     format!("{BASE}{path}"),
+            cover_url: cover,
+            source_url: format!("{BASE}{path}"),
             chapter_number: Some(num),
-            released_at:    None,
+            released_at: None,
         });
     }
     out
@@ -460,8 +507,9 @@ fn find_cover_near(a: &scraper::ElementRef<'_>) -> Option<String> {
     }
     // Walk up two levels via NodeRef::parent() + ElementRef::wrap (same
     // pattern as mangack::find_cover_in_ancestors).
-    let parent     = a.parent().and_then(scraper::ElementRef::wrap);
-    let grandparent = a.parent()
+    let parent = a.parent().and_then(scraper::ElementRef::wrap);
+    let grandparent = a
+        .parent()
         .and_then(|p| p.parent())
         .and_then(scraper::ElementRef::wrap);
     for ancestor in [parent, grandparent].into_iter().flatten() {
@@ -483,26 +531,30 @@ fn parse_chapter_links(tree: &Html, series_path_prefix: &str) -> Vec<ChapterData
     };
 
     let mut chapters = Vec::new();
-    let mut seen_urls:    HashSet<String> = HashSet::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
 
     for a in tree.select(&sel) {
         let href = match a.value().attr("href") {
             Some(h) => h.to_string(),
-            None    => continue,
+            None => continue,
         };
-        if href.is_empty() || seen_urls.contains(&href) { continue; }
+        if href.is_empty() || seen_urls.contains(&href) {
+            continue;
+        }
 
         let label_text = a.text().collect::<String>();
-        if is_nav_label(&label_text) { continue; }
+        if is_nav_label(&label_text) {
+            continue;
+        }
         seen_urls.insert(href.clone());
 
         let cap = match CHAPTER_NUM_RE.captures(&href) {
             Some(c) => c,
-            None    => continue,
+            None => continue,
         };
         let number: f64 = match cap.get(1).and_then(|m| m.as_str().parse().ok()) {
             Some(n) => n,
-            None    => continue,
+            None => continue,
         };
 
         let title = a
@@ -518,7 +570,11 @@ fn parse_chapter_links(tree: &Html, series_path_prefix: &str) -> Vec<ChapterData
             .filter(|s| !s.is_empty())
             .and_then(|s| parse_date(&s));
 
-        let full_url = if href.starts_with('/') { format!("{BASE}{href}") } else { href.clone() };
+        let full_url = if href.starts_with('/') {
+            format!("{BASE}{href}")
+        } else {
+            href.clone()
+        };
 
         chapters.push(ChapterData {
             number,
@@ -536,7 +592,9 @@ fn urlencoding_minimal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -565,7 +623,10 @@ mod tests {
         let u = "https://asurascans.com/comics/solo-leveling-1a2b3c4d/?ref=home#top";
         assert_eq!(series_path(u), "/comics/solo-leveling-1a2b3c4d");
         assert_eq!(slug_key(u), "solo-leveling");
-        assert_eq!(slug_key("https://asurascans.com/comics/solo-leveling-9f8e7d6c"), "solo-leveling");
+        assert_eq!(
+            slug_key("https://asurascans.com/comics/solo-leveling-9f8e7d6c"),
+            "solo-leveling"
+        );
     }
 
     // --- M8: lazy-loaded covers ---
@@ -580,7 +641,10 @@ mod tests {
         </div></body></html>"#;
         let r = parse_search(html);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].cover_url.as_deref(), Some("https://cdn.x/covers/solo.webp"));
+        assert_eq!(
+            r[0].cover_url.as_deref(),
+            Some("https://cdn.x/covers/solo.webp")
+        );
     }
 
     #[test]
@@ -590,7 +654,10 @@ mod tests {
             <a href="/comics/tower-of-god-1a2b3c4d"><h3>Tower of God</h3></a>
         </div></body></html>"#;
         let r = parse_search(html);
-        assert_eq!(r[0].cover_url.as_deref(), Some("https://cdn.x/covers/tog.webp"));
+        assert_eq!(
+            r[0].cover_url.as_deref(),
+            Some("https://cdn.x/covers/tog.webp")
+        );
     }
 
     // --- M7: unparsable pages are errors, status is scoped ---
@@ -599,7 +666,8 @@ mod tests {
     const NEW: &str = "https://asurascans.com/comics/solo-leveling-9f8e7d6c";
 
     fn series_page(status_sidebar: &str, status_info: &str) -> String {
-        format!(r#"<html><body>
+        format!(
+            r#"<html><body>
             <aside><span>{status_sidebar}</span><a href="/comics/other-00000000/chapter/9">Chapter 9</a></aside>
             <main><div class="info">
               <img src="https://cdn.x/covers/solo.webp">
@@ -610,7 +678,8 @@ mod tests {
               <a href="/comics/solo-leveling-9f8e7d6c/chapter/1"><span class="truncate">Chapter 1</span></a>
               <a href="/comics/solo-leveling-9f8e7d6c/chapter/2"><span class="truncate">Chapter 2</span></a>
             </div></main>
-        </body></html>"#)
+        </body></html>"#
+        )
     }
 
     #[test]
@@ -648,8 +717,14 @@ mod tests {
     fn slug_key_ignores_host_and_hash_suffix() {
         assert_eq!(slug_key(OLD), "solo-leveling");
         assert_eq!(slug_key(&format!("{NEW}/")), "solo-leveling");
-        assert_eq!(slug_key("https://asuracomic.net/series/solo-leveling-abcdef12/"), "solo-leveling");
-        assert_ne!(slug_key("https://asurascans.com/comics/solo-leveling-2-1a2b3c4d"), "solo-leveling");
+        assert_eq!(
+            slug_key("https://asuracomic.net/series/solo-leveling-abcdef12/"),
+            "solo-leveling"
+        );
+        assert_ne!(
+            slug_key("https://asurascans.com/comics/solo-leveling-2-1a2b3c4d"),
+            "solo-leveling"
+        );
     }
 
     // --- L13: image URLs on any CDN host, empty is an error ---

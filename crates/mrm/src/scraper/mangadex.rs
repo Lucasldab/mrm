@@ -57,11 +57,11 @@ impl MangaDexScraper {
 /// Map MangaDex status string to canonical pub_status value.
 fn map_status(raw: Option<&str>) -> String {
     match raw.unwrap_or("").to_lowercase().as_str() {
-        "ongoing"   => "ongoing".into(),
-        "hiatus"    => "hiatus".into(),
+        "ongoing" => "ongoing".into(),
+        "hiatus" => "hiatus".into(),
         "completed" => "completed".into(),
-        "cancelled" => "completed".into(),  // cancelled → completed
-        _           => "ongoing".into(),
+        "cancelled" => "completed".into(), // cancelled → completed
+        _ => "ongoing".into(),
     }
 }
 
@@ -69,9 +69,13 @@ fn map_status(raw: Option<&str>) -> String {
 /// Preference: "en" → "ja-ro" → first available value.
 fn extract_title(attributes: &serde_json::Value) -> String {
     let t = &attributes["title"];
-    t["en"].as_str()
+    t["en"]
+        .as_str()
         .or_else(|| t["ja-ro"].as_str())
-        .or_else(|| t.as_object().and_then(|m| m.values().next().and_then(|v| v.as_str())))
+        .or_else(|| {
+            t.as_object()
+                .and_then(|m| m.values().next().and_then(|v| v.as_str()))
+        })
         .unwrap_or("")
         .to_string()
 }
@@ -80,10 +84,16 @@ fn extract_title(attributes: &serde_json::Value) -> String {
 /// Preference: "en" → first available value. Returns None when blank.
 fn extract_description(attributes: &serde_json::Value) -> Option<String> {
     let d = &attributes["description"];
-    let raw = d["en"].as_str()
-        .or_else(|| d.as_object().and_then(|m| m.values().next().and_then(|v| v.as_str())))?;
+    let raw = d["en"].as_str().or_else(|| {
+        d.as_object()
+            .and_then(|m| m.values().next().and_then(|v| v.as_str()))
+    })?;
     let trimmed = raw.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Build cover URL from the cover_art relationship entry.
@@ -134,7 +144,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.check_status()
+            let r = r
+                .check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -155,11 +166,11 @@ impl Scraper for MangaDexScraper {
             let cover_url = extract_cover(manga_id, &item["relationships"]);
 
             results.push(SearchResult {
-                title:      extract_title(attr),
+                title: extract_title(attr),
                 cover_url,
                 source_url: format!("{BASE}/manga/{manga_id}"),
                 pub_status: map_status(attr["status"].as_str()),
-                source:     "mangadex".into(),
+                source: "mangadex".into(),
             });
         }
 
@@ -179,7 +190,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.check_status()
+            let r = r
+                .check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -195,7 +207,7 @@ impl Scraper for MangaDexScraper {
         let chapters = self._fetch_all_chapters(&manga_id).await?;
 
         Ok(SeriesData {
-            title:      extract_title(attr),
+            title: extract_title(attr),
             cover_url,
             source_url: source_url.to_string(),
             pub_status: map_status(attr["status"].as_str()),
@@ -216,7 +228,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.check_status()
+            let r = r
+                .check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -271,7 +284,8 @@ impl Scraper for MangaDexScraper {
                 .send()
                 .await
                 .with_context(|| format!("MangaDex GET {url} failed"))?;
-            let r = r.check_status()
+            let r = r
+                .check_status()
                 .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
             r.json::<serde_json::Value>()
                 .await
@@ -329,7 +343,9 @@ fn parse_feed_items(items: &[serde_json::Value], seen: &mut HashSet<u64>) -> Vec
         let Some(number) = attr["chapter"].as_str().and_then(|s| f64::from_str(s).ok()) else {
             continue;
         };
-        let Some(item_id) = item["id"].as_str() else { continue };
+        let Some(item_id) = item["id"].as_str() else {
+            continue;
+        };
 
         // Deduplicate: use bit representation for hash-equality on f64
         if !seen.insert(number.to_bits()) {
@@ -344,8 +360,8 @@ fn parse_feed_items(items: &[serde_json::Value], seen: &mut HashSet<u64>) -> Vec
 
         out.push(ChapterData {
             number,
-            title:       attr["title"].as_str().map(|s| s.to_string()),
-            url:         format!("{BASE}/chapter/{item_id}"),
+            title: attr["title"].as_str().map(|s| s.to_string()),
+            url: format!("{BASE}/chapter/{item_id}"),
             released_at,
         });
     }
@@ -405,7 +421,8 @@ impl MangaDexScraper {
                     .with_context(|| format!("MangaDex GET {url} failed"))?;
                 // Without this a 429/5xx/400 body (no `data`) ended the loop
                 // and returned a partial chapter list as success (M6).
-                let r = r.check_status()
+                let r = r
+                    .check_status()
                     .with_context(|| format!("MangaDex GET {url} HTTP error"))?;
                 r.json::<serde_json::Value>()
                     .await
@@ -474,7 +491,10 @@ mod tests {
     fn feed_keeps_first_readable_entry_per_number_across_pages() {
         let mut seen = HashSet::new();
         let a = parse_feed_items(&[item("first", "5", 20, None)], &mut seen);
-        let b = parse_feed_items(&[item("second", "5", 20, None), item("six", "6", 20, None)], &mut seen);
+        let b = parse_feed_items(
+            &[item("second", "5", 20, None), item("six", "6", 20, None)],
+            &mut seen,
+        );
         assert_eq!(a[0].url, format!("{BASE}/chapter/first"));
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].number, 6.0);
@@ -485,6 +505,10 @@ mod tests {
         let mut v = item("nopages", "7", 0, None);
         v["attributes"].as_object_mut().unwrap().remove("pages");
         let out = parse_feed_items(&[v], &mut HashSet::new());
-        assert_eq!(out.len(), 1, "absent `pages` is not evidence of an empty chapter");
+        assert_eq!(
+            out.len(),
+            1,
+            "absent `pages` is not evidence of an empty chapter"
+        );
     }
 }

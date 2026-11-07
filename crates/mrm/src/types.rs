@@ -17,23 +17,23 @@ pub enum Status {
 impl Status {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "reading"      => Self::Reading,
-            "up_to_date"   => Self::UpToDate,
-            "paused"       => Self::Paused,
-            "completed"    => Self::Completed,
-            "dropped"      => Self::Dropped,
-            _              => Self::LookedInto,
+            "reading" => Self::Reading,
+            "up_to_date" => Self::UpToDate,
+            "paused" => Self::Paused,
+            "completed" => Self::Completed,
+            "dropped" => Self::Dropped,
+            _ => Self::LookedInto,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::LookedInto => "looked_into",
-            Self::Reading    => "reading",
-            Self::UpToDate   => "up_to_date",
-            Self::Paused     => "paused",
-            Self::Completed  => "completed",
-            Self::Dropped    => "dropped",
+            Self::Reading => "reading",
+            Self::UpToDate => "up_to_date",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Dropped => "dropped",
         }
     }
 
@@ -41,11 +41,11 @@ impl Status {
     pub fn label(&self, _unread: u32) -> String {
         match self {
             Self::LookedInto => "👀 Looked into".into(),
-            Self::Reading    => "📖 Reading".into(),
-            Self::UpToDate   => "✅ Up to date".into(),
-            Self::Paused     => "⏸  Paused".into(),
-            Self::Completed  => "🏁 Completed".into(),
-            Self::Dropped    => "🗑  Dropped".into(),
+            Self::Reading => "📖 Reading".into(),
+            Self::UpToDate => "✅ Up to date".into(),
+            Self::Paused => "⏸  Paused".into(),
+            Self::Completed => "🏁 Completed".into(),
+            Self::Dropped => "🗑  Dropped".into(),
         }
     }
 
@@ -57,12 +57,12 @@ impl Status {
     /// Sort rank: Reading first, then UpToDate, etc.
     pub fn sort_rank(&self) -> u8 {
         match self {
-            Self::Reading    => 0,
-            Self::UpToDate   => 1,
+            Self::Reading => 0,
+            Self::UpToDate => 1,
             Self::LookedInto => 2,
-            Self::Paused     => 3,
-            Self::Completed  => 4,
-            Self::Dropped    => 5,
+            Self::Paused => 3,
+            Self::Completed => 4,
+            Self::Dropped => 5,
         }
     }
 
@@ -102,7 +102,7 @@ pub enum SortMode {
 impl SortMode {
     pub fn next(self) -> Self {
         match self {
-            Self::Title  => Self::Unread,
+            Self::Title => Self::Unread,
             Self::Unread => Self::Status,
             Self::Status => Self::Title,
         }
@@ -110,7 +110,7 @@ impl SortMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Title  => "Title",
+            Self::Title => "Title",
             Self::Unread => "Unread",
             Self::Status => "Status",
         }
@@ -123,19 +123,19 @@ impl SortMode {
 
 #[derive(Debug, Clone)]
 pub struct Manhwa {
-    pub id:          i64,
-    pub title:       String,
-    pub cover_url:   Option<String>,
-    pub source:      String,
-    pub source_url:  String,
-    pub pub_status:  String,   // "ongoing" | "hiatus" | "completed"
-    pub status:      Status,
+    pub id: i64,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub source: String,
+    pub source_url: String,
+    pub pub_status: String, // "ongoing" | "hiatus" | "completed"
+    pub status: Status,
     pub status_override: bool,
     pub description: Option<String>,
-    pub unread:      u32,      // computed, not stored
-    pub total:       u32,      // chapter count, computed
+    pub unread: u32, // computed, not stored
+    pub total: u32,  // chapter count, computed
     /// Last poll error while the series is failing (None once a poll works).
-    pub last_error:  Option<String>,
+    pub last_error: Option<String>,
     /// When the current run of failed polls started, as Postgres text.
     pub failing_since: Option<String>,
     /// Set while the latest poll saw two chapters with one number (M10 guard
@@ -146,9 +146,7 @@ pub struct Manhwa {
 impl Manhwa {
     /// The label to display in the library list
     pub fn status_display(&self) -> String {
-        if self.unread > 0
-            && (self.status == Status::UpToDate || self.status == Status::Reading)
-        {
+        if self.unread > 0 && (self.status == Status::UpToDate || self.status == Status::Reading) {
             Status::unread_label(self.unread)
         } else {
             self.status.label(self.unread)
@@ -162,15 +160,15 @@ impl Manhwa {
 
 #[derive(Debug, Clone)]
 pub struct Chapter {
-    pub id:          i64,
+    pub id: i64,
     #[allow(dead_code)]
-    pub manhwa_id:   i64,
-    pub number:      f64,
-    pub title:       Option<String>,
-    pub url:         String,
+    pub manhwa_id: i64,
+    pub number: f64,
+    pub title: Option<String>,
+    pub url: String,
     pub released_at: Option<String>,
-    pub completed:   bool,     // true if scrolled to bottom
-    pub scroll_pct:  f64,      // 0.0–1.0
+    pub completed: bool, // true if scrolled to bottom
+    pub scroll_pct: f64, // 0.0–1.0
 }
 
 impl Chapter {
@@ -185,9 +183,9 @@ impl Chapter {
         if self.completed {
             "✓"
         } else if self.scroll_pct > 0.0 {
-            "▶"   // in progress
+            "▶" // in progress
         } else {
-            "○"   // unread
+            "○" // unread
         }
     }
 }
@@ -198,16 +196,16 @@ impl Chapter {
 
 #[derive(Debug, Clone)]
 pub struct Discovery {
-    pub id:             i64,
-    pub source:         String,
-    pub source_url:     String,
-    pub title:          String,
-    pub cover_url:      Option<String>,
+    pub id: i64,
+    pub source: String,
+    pub source_url: String,
+    pub title: String,
+    pub cover_url: Option<String>,
     pub chapter_number: Option<f64>,
     #[allow(dead_code)]
-    pub released_at:    Option<String>,
+    pub released_at: Option<String>,
     #[allow(dead_code)]
-    pub first_seen_at:  Option<String>,
+    pub first_seen_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +216,7 @@ pub struct Discovery {
 pub enum Screen {
     Library,
     Detail { manhwa_id: i64 },
-    Reader  { manhwa_id: i64, chapter_id: i64 },
+    Reader { manhwa_id: i64, chapter_id: i64 },
     StatusPicker { manhwa_id: i64 },
     Search,
     Discover,
@@ -238,9 +236,9 @@ pub enum AppEvent {
     /// A spawned cross-source search finished. `seq` identifies the search so
     /// a cancelled or superseded one is ignored.
     SearchDone {
-        seq:     u64,
+        seq: u64,
         results: Vec<crate::scraper::SearchResult>,
-        errors:  Vec<String>,
+        errors: Vec<String>,
     },
     /// The series fetch for "add from search" finished.
     AddDone {
@@ -250,12 +248,12 @@ pub enum AppEvent {
     /// The series fetch for a Detail-screen refresh (`R`) finished.
     RefreshDone {
         manhwa_id: i64,
-        result:    Result<crate::scraper::SeriesData, String>,
+        result: Result<crate::scraper::SeriesData, String>,
     },
     /// The series fetch for "add from Discover" finished.
     DiscoveryAddDone {
         discovery_id: i64,
-        source:       String,
-        result:       Result<crate::scraper::SeriesData, String>,
+        source: String,
+        result: Result<crate::scraper::SeriesData, String>,
     },
 }

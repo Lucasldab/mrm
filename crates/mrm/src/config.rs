@@ -3,11 +3,11 @@
 //! Reads config.toml from the project root (or path overridable via env).
 //! Config is loaded once at startup and passed by clone into tasks that need it.
 
-use std::collections::HashMap;
 use anyhow::{Context, Result};
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Structs
@@ -15,32 +15,37 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub sources:       HashMap<String, SourceConfig>,
+    pub sources: HashMap<String, SourceConfig>,
     pub notifications: NotificationsConfig,
     #[serde(default)]
-    pub db:            DbConfig,
+    pub db: DbConfig,
     #[serde(default)]
-    pub keys:          KeysConfig,
+    pub keys: KeysConfig,
     #[serde(default)]
-    pub theme:         ThemeConfig,
+    pub theme: ThemeConfig,
     #[serde(default)]
-    pub imv:           ImvConfig,
+    pub imv: ImvConfig,
     #[serde(default)]
-    pub rv:            RvConfig,
+    pub rv: RvConfig,
     #[serde(default = "default_viewer")]
-    pub viewer:        String,
+    pub viewer: String,
 }
 
-fn default_viewer() -> String { "imv".into() }
+fn default_viewer() -> String {
+    "imv".into()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewerKind { Imv, Rv }
+pub enum ViewerKind {
+    Imv,
+    Rv,
+}
 
 impl Config {
     pub fn viewer_kind(&self) -> ViewerKind {
         match self.viewer.to_lowercase().as_str() {
             "rv" => ViewerKind::Rv,
-            _    => ViewerKind::Imv,
+            _ => ViewerKind::Imv,
         }
     }
 }
@@ -49,7 +54,7 @@ impl Config {
 pub struct SourceConfig {
     #[allow(dead_code)]
     pub base_url: String,
-    pub enabled:  bool,
+    pub enabled: bool,
     /// Path to the project root where the Python scraper package lives.
     /// Required for sources that delegate to Python (e.g. asura).
     /// DEPRECATED: legacy path to the Python `scraper/` directory used by the
@@ -62,7 +67,7 @@ pub struct SourceConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotificationsConfig {
-    pub enabled:               bool,
+    pub enabled: bool,
     pub poll_interval_minutes: u64,
 
     /// Optional push-notification dispatch via ntfy.sh.
@@ -102,8 +107,12 @@ pub struct NtfyConfig {
     pub auth_token: Option<String>,
 }
 
-fn default_ntfy_enabled() -> bool { true }
-fn default_ntfy_server()  -> String { "https://ntfy.sh".into() }
+fn default_ntfy_enabled() -> bool {
+    true
+}
+fn default_ntfy_server() -> String {
+    "https://ntfy.sh".into()
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DbConfig {
@@ -114,21 +123,31 @@ pub struct DbConfig {
 }
 
 /// MRM_DATABASE_URL wins; otherwise read [db] url_file.
-pub fn resolve_database_url(env: Option<String>, db: &DbConfig, config_dir: &std::path::Path) -> Result<String> {
+pub fn resolve_database_url(
+    env: Option<String>,
+    db: &DbConfig,
+    config_dir: &std::path::Path,
+) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
     if let Some(url) = env.filter(|u| !u.is_empty()) {
         return Ok(url);
     }
-    let raw = db.url_file.as_deref()
-        .context("no database configured: set [db] url_file in config.toml (or MRM_DATABASE_URL)")?;
+    let raw = db.url_file.as_deref().context(
+        "no database configured: set [db] url_file in config.toml (or MRM_DATABASE_URL)",
+    )?;
     let path = match raw.strip_prefix("~/") {
-        Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
+        Some(rest) => {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest)
+        }
         None => config_dir.join(raw),
     };
     let meta = std::fs::metadata(&path)
         .with_context(|| format!("database url_file {} not found", path.display()))?;
     if meta.permissions().mode() & 0o077 != 0 {
-        anyhow::bail!("{} holds a password and is readable by others: chmod 600 it", path.display());
+        anyhow::bail!(
+            "{} holds a password and is readable by others: chmod 600 it",
+            path.display()
+        );
     }
     let url = std::fs::read_to_string(&path)?.trim().to_string();
     anyhow::ensure!(!url.is_empty(), "{} is empty", path.display());
@@ -151,24 +170,24 @@ pub fn config_dir() -> std::path::PathBuf {
 #[serde(default)]
 pub struct KeysConfig {
     // Navigation (shared across screens)
-    pub down:         String,
-    pub up:           String,
-    pub left:         String,
-    pub right:        String,
-    pub top:          String,
-    pub bottom:       String,
-    pub open:         String,
-    pub back:         String,
+    pub down: String,
+    pub up: String,
+    pub left: String,
+    pub right: String,
+    pub top: String,
+    pub bottom: String,
+    pub open: String,
+    pub back: String,
 
     // Library
-    pub search:       String,
-    pub add:          String,
-    pub delete:       String,
+    pub search: String,
+    pub add: String,
+    pub delete: String,
 
     // Detail
-    pub set_status:   String,
-    pub mark_unread:  String,
-    pub mark_read:    String,
+    pub set_status: String,
+    pub mark_unread: String,
+    pub mark_read: String,
     pub clear_override: String,
 
     // Reader
@@ -176,38 +195,38 @@ pub struct KeysConfig {
     pub prev_chapter: String,
 
     // Search results
-    pub input_mode:   String,
+    pub input_mode: String,
 
     // Library sort
-    pub sort:         String,
+    pub sort: String,
 
     // Library: wake the background poller now
-    pub poll_now:     String,
+    pub poll_now: String,
 }
 
 impl Default for KeysConfig {
     fn default() -> Self {
         Self {
-            down:           "j".into(),
-            up:             "k".into(),
-            left:           "h".into(),
-            right:          "l".into(),
-            top:            "g".into(),
-            bottom:         "G".into(),
-            open:           "Enter".into(),
-            back:           "Esc".into(),
-            search:         "/".into(),
-            add:            "a".into(),
-            delete:         "d".into(),
-            set_status:     "s".into(),
-            mark_unread:    "u".into(),
-            mark_read:      "r".into(),
+            down: "j".into(),
+            up: "k".into(),
+            left: "h".into(),
+            right: "l".into(),
+            top: "g".into(),
+            bottom: "G".into(),
+            open: "Enter".into(),
+            back: "Esc".into(),
+            search: "/".into(),
+            add: "a".into(),
+            delete: "d".into(),
+            set_status: "s".into(),
+            mark_unread: "u".into(),
+            mark_read: "r".into(),
             clear_override: "c".into(),
-            next_chapter:   "]".into(),
-            prev_chapter:   "[".into(),
-            input_mode:     "i".into(),
-            sort:           "o".into(),
-            poll_now:       "p".into(),
+            next_chapter: "]".into(),
+            prev_chapter: "[".into(),
+            input_mode: "i".into(),
+            sort: "o".into(),
+            poll_now: "p".into(),
         }
     }
 }
@@ -217,38 +236,78 @@ impl KeysConfig {
     pub fn parse_key(s: &str) -> KeyCode {
         match s {
             "Enter" | "enter" | "Return" | "return" => KeyCode::Enter,
-            "Esc" | "esc" | "Escape" | "escape"     => KeyCode::Esc,
-            "Backspace" | "backspace" | "bs"         => KeyCode::Backspace,
-            "Tab" | "tab"                            => KeyCode::Tab,
-            "Up" | "up"                              => KeyCode::Up,
-            "Down" | "down"                          => KeyCode::Down,
-            "Left" | "left"                          => KeyCode::Left,
-            "Right" | "right"                        => KeyCode::Right,
-            s if s.len() == 1                        => KeyCode::Char(s.chars().next().unwrap()),
-            _                                        => KeyCode::Null,
+            "Esc" | "esc" | "Escape" | "escape" => KeyCode::Esc,
+            "Backspace" | "backspace" | "bs" => KeyCode::Backspace,
+            "Tab" | "tab" => KeyCode::Tab,
+            "Up" | "up" => KeyCode::Up,
+            "Down" | "down" => KeyCode::Down,
+            "Left" | "left" => KeyCode::Left,
+            "Right" | "right" => KeyCode::Right,
+            s if s.len() == 1 => KeyCode::Char(s.chars().next().unwrap()),
+            _ => KeyCode::Null,
         }
     }
 
-    pub fn down(&self)           -> KeyCode { Self::parse_key(&self.down) }
-    pub fn up(&self)             -> KeyCode { Self::parse_key(&self.up) }
-    pub fn left(&self)           -> KeyCode { Self::parse_key(&self.left) }
-    pub fn right(&self)          -> KeyCode { Self::parse_key(&self.right) }
-    pub fn top(&self)            -> KeyCode { Self::parse_key(&self.top) }
-    pub fn bottom(&self)         -> KeyCode { Self::parse_key(&self.bottom) }
-    pub fn open(&self)           -> KeyCode { Self::parse_key(&self.open) }
-    pub fn back(&self)           -> KeyCode { Self::parse_key(&self.back) }
-    pub fn search(&self)         -> KeyCode { Self::parse_key(&self.search) }
-    pub fn add(&self)            -> KeyCode { Self::parse_key(&self.add) }
-    pub fn delete(&self)         -> KeyCode { Self::parse_key(&self.delete) }
-    pub fn set_status(&self)     -> KeyCode { Self::parse_key(&self.set_status) }
-    pub fn mark_unread(&self)    -> KeyCode { Self::parse_key(&self.mark_unread) }
-    pub fn mark_read(&self)      -> KeyCode { Self::parse_key(&self.mark_read) }
-    pub fn clear_override(&self) -> KeyCode { Self::parse_key(&self.clear_override) }
-    pub fn next_chapter(&self)   -> KeyCode { Self::parse_key(&self.next_chapter) }
-    pub fn prev_chapter(&self)   -> KeyCode { Self::parse_key(&self.prev_chapter) }
-    pub fn input_mode(&self)     -> KeyCode { Self::parse_key(&self.input_mode) }
-    pub fn sort(&self)           -> KeyCode { Self::parse_key(&self.sort) }
-    pub fn poll_now(&self)       -> KeyCode { Self::parse_key(&self.poll_now) }
+    pub fn down(&self) -> KeyCode {
+        Self::parse_key(&self.down)
+    }
+    pub fn up(&self) -> KeyCode {
+        Self::parse_key(&self.up)
+    }
+    pub fn left(&self) -> KeyCode {
+        Self::parse_key(&self.left)
+    }
+    pub fn right(&self) -> KeyCode {
+        Self::parse_key(&self.right)
+    }
+    pub fn top(&self) -> KeyCode {
+        Self::parse_key(&self.top)
+    }
+    pub fn bottom(&self) -> KeyCode {
+        Self::parse_key(&self.bottom)
+    }
+    pub fn open(&self) -> KeyCode {
+        Self::parse_key(&self.open)
+    }
+    pub fn back(&self) -> KeyCode {
+        Self::parse_key(&self.back)
+    }
+    pub fn search(&self) -> KeyCode {
+        Self::parse_key(&self.search)
+    }
+    pub fn add(&self) -> KeyCode {
+        Self::parse_key(&self.add)
+    }
+    pub fn delete(&self) -> KeyCode {
+        Self::parse_key(&self.delete)
+    }
+    pub fn set_status(&self) -> KeyCode {
+        Self::parse_key(&self.set_status)
+    }
+    pub fn mark_unread(&self) -> KeyCode {
+        Self::parse_key(&self.mark_unread)
+    }
+    pub fn mark_read(&self) -> KeyCode {
+        Self::parse_key(&self.mark_read)
+    }
+    pub fn clear_override(&self) -> KeyCode {
+        Self::parse_key(&self.clear_override)
+    }
+    pub fn next_chapter(&self) -> KeyCode {
+        Self::parse_key(&self.next_chapter)
+    }
+    pub fn prev_chapter(&self) -> KeyCode {
+        Self::parse_key(&self.prev_chapter)
+    }
+    pub fn input_mode(&self) -> KeyCode {
+        Self::parse_key(&self.input_mode)
+    }
+    pub fn sort(&self) -> KeyCode {
+        Self::parse_key(&self.sort)
+    }
+    pub fn poll_now(&self) -> KeyCode {
+        Self::parse_key(&self.poll_now)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,49 +319,49 @@ impl KeysConfig {
 pub struct ThemeConfig {
     // Status colors
     pub status_looked_into: String,
-    pub status_reading:     String,
-    pub status_up_to_date:  String,
-    pub status_paused:      String,
-    pub status_completed:   String,
-    pub status_dropped:     String,
+    pub status_reading: String,
+    pub status_up_to_date: String,
+    pub status_paused: String,
+    pub status_completed: String,
+    pub status_dropped: String,
 
     // UI elements
-    pub accent:             String, // selected borders, search bar, key labels
-    pub text:               String, // primary text
-    pub text_secondary:     String, // labels, hints, placeholders
-    pub text_bold:          String, // titles, headers
-    pub bar_fg:             String, // status bar foreground
-    pub bar_bg:             String, // status bar background
-    pub highlight_bg:       String, // list selection background
-    pub unread_badge:       String, // unread chapter count
-    pub error:              String, // error messages
-    pub success:            String, // success indicators
-    pub warning:            String, // warnings, partial progress
-    pub border:             String, // default borders
+    pub accent: String,         // selected borders, search bar, key labels
+    pub text: String,           // primary text
+    pub text_secondary: String, // labels, hints, placeholders
+    pub text_bold: String,      // titles, headers
+    pub bar_fg: String,         // status bar foreground
+    pub bar_bg: String,         // status bar background
+    pub highlight_bg: String,   // list selection background
+    pub unread_badge: String,   // unread chapter count
+    pub error: String,          // error messages
+    pub success: String,        // success indicators
+    pub warning: String,        // warnings, partial progress
+    pub border: String,         // default borders
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             status_looked_into: "gray".into(),
-            status_reading:     "green".into(),
-            status_up_to_date:  "cyan".into(),
-            status_paused:      "yellow".into(),
-            status_completed:   "blue".into(),
-            status_dropped:     "darkgray".into(),
+            status_reading: "green".into(),
+            status_up_to_date: "cyan".into(),
+            status_paused: "yellow".into(),
+            status_completed: "blue".into(),
+            status_dropped: "darkgray".into(),
 
-            accent:             "yellow".into(),
-            text:               "white".into(),
-            text_secondary:     "darkgray".into(),
-            text_bold:          "white".into(),
-            bar_fg:             "black".into(),
-            bar_bg:             "white".into(),
-            highlight_bg:       "darkgray".into(),
-            unread_badge:       "red".into(),
-            error:              "red".into(),
-            success:            "green".into(),
-            warning:            "yellow".into(),
-            border:             "white".into(),
+            accent: "yellow".into(),
+            text: "white".into(),
+            text_secondary: "darkgray".into(),
+            text_bold: "white".into(),
+            bar_fg: "black".into(),
+            bar_bg: "white".into(),
+            highlight_bg: "darkgray".into(),
+            unread_badge: "red".into(),
+            error: "red".into(),
+            success: "green".into(),
+            warning: "yellow".into(),
+            border: "white".into(),
         }
     }
 }
@@ -310,23 +369,23 @@ impl Default for ThemeConfig {
 impl ThemeConfig {
     pub fn parse_color(s: &str) -> Color {
         match s.to_lowercase().as_str() {
-            "black"       => Color::Black,
-            "red"         => Color::Red,
-            "green"       => Color::Green,
-            "yellow"      => Color::Yellow,
-            "blue"        => Color::Blue,
-            "magenta"     => Color::Magenta,
-            "cyan"        => Color::Cyan,
+            "black" => Color::Black,
+            "red" => Color::Red,
+            "green" => Color::Green,
+            "yellow" => Color::Yellow,
+            "blue" => Color::Blue,
+            "magenta" => Color::Magenta,
+            "cyan" => Color::Cyan,
             "gray" | "grey" => Color::Gray,
             "darkgray" | "darkgrey" | "dark_gray" | "dark_grey" => Color::DarkGray,
-            "lightred" | "light_red"       => Color::LightRed,
-            "lightgreen" | "light_green"   => Color::LightGreen,
+            "lightred" | "light_red" => Color::LightRed,
+            "lightgreen" | "light_green" => Color::LightGreen,
             "lightyellow" | "light_yellow" => Color::LightYellow,
-            "lightblue" | "light_blue"     => Color::LightBlue,
+            "lightblue" | "light_blue" => Color::LightBlue,
             "lightmagenta" | "light_magenta" => Color::LightMagenta,
-            "lightcyan" | "light_cyan"     => Color::LightCyan,
-            "white"       => Color::White,
-            "reset"       => Color::Reset,
+            "lightcyan" | "light_cyan" => Color::LightCyan,
+            "white" => Color::White,
+            "reset" => Color::Reset,
             s if s.starts_with('#') && s.len() == 7 => {
                 // Parse #RRGGBB hex color
                 let r = u8::from_str_radix(&s[1..3], 16).unwrap_or(255);
@@ -348,26 +407,50 @@ impl ThemeConfig {
         use crate::types::Status;
         match status {
             Status::LookedInto => Self::parse_color(&self.status_looked_into),
-            Status::Reading    => Self::parse_color(&self.status_reading),
-            Status::UpToDate   => Self::parse_color(&self.status_up_to_date),
-            Status::Paused     => Self::parse_color(&self.status_paused),
-            Status::Completed  => Self::parse_color(&self.status_completed),
-            Status::Dropped    => Self::parse_color(&self.status_dropped),
+            Status::Reading => Self::parse_color(&self.status_reading),
+            Status::UpToDate => Self::parse_color(&self.status_up_to_date),
+            Status::Paused => Self::parse_color(&self.status_paused),
+            Status::Completed => Self::parse_color(&self.status_completed),
+            Status::Dropped => Self::parse_color(&self.status_dropped),
         }
     }
 
-    pub fn accent(&self)         -> Color { Self::parse_color(&self.accent) }
-    pub fn text(&self)           -> Color { Self::parse_color(&self.text) }
-    pub fn text_secondary(&self) -> Color { Self::parse_color(&self.text_secondary) }
-    pub fn text_bold(&self)      -> Color { Self::parse_color(&self.text_bold) }
-    pub fn bar_fg(&self)         -> Color { Self::parse_color(&self.bar_fg) }
-    pub fn bar_bg(&self)         -> Color { Self::parse_color(&self.bar_bg) }
-    pub fn highlight_bg(&self)   -> Color { Self::parse_color(&self.highlight_bg) }
-    pub fn unread_badge(&self)   -> Color { Self::parse_color(&self.unread_badge) }
-    pub fn error(&self)          -> Color { Self::parse_color(&self.error) }
-    pub fn success(&self)        -> Color { Self::parse_color(&self.success) }
-    pub fn warning(&self)        -> Color { Self::parse_color(&self.warning) }
-    pub fn border(&self)         -> Color { Self::parse_color(&self.border) }
+    pub fn accent(&self) -> Color {
+        Self::parse_color(&self.accent)
+    }
+    pub fn text(&self) -> Color {
+        Self::parse_color(&self.text)
+    }
+    pub fn text_secondary(&self) -> Color {
+        Self::parse_color(&self.text_secondary)
+    }
+    pub fn text_bold(&self) -> Color {
+        Self::parse_color(&self.text_bold)
+    }
+    pub fn bar_fg(&self) -> Color {
+        Self::parse_color(&self.bar_fg)
+    }
+    pub fn bar_bg(&self) -> Color {
+        Self::parse_color(&self.bar_bg)
+    }
+    pub fn highlight_bg(&self) -> Color {
+        Self::parse_color(&self.highlight_bg)
+    }
+    pub fn unread_badge(&self) -> Color {
+        Self::parse_color(&self.unread_badge)
+    }
+    pub fn error(&self) -> Color {
+        Self::parse_color(&self.error)
+    }
+    pub fn success(&self) -> Color {
+        Self::parse_color(&self.success)
+    }
+    pub fn warning(&self) -> Color {
+        Self::parse_color(&self.warning)
+    }
+    pub fn border(&self) -> Color {
+        Self::parse_color(&self.border)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -377,26 +460,26 @@ impl ThemeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ImvConfig {
-    pub binary:  String,
+    pub binary: String,
     pub options: ImvOptions,
-    pub binds:   HashMap<String, String>,
+    pub binds: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ImvOptions {
-    pub initial_pan:            String,
-    pub scaling_mode:           String,
-    pub pan_limits:             String,
+    pub initial_pan: String,
+    pub scaling_mode: String,
+    pub pan_limits: String,
     pub suppress_default_binds: String,
 }
 
 impl Default for ImvOptions {
     fn default() -> Self {
         Self {
-            initial_pan:            "50 0".into(),
-            scaling_mode:           "none".into(),
-            pan_limits:             "yes".into(),
+            initial_pan: "50 0".into(),
+            scaling_mode: "none".into(),
+            pan_limits: "yes".into(),
             suppress_default_binds: "true".into(),
         }
     }
@@ -405,23 +488,27 @@ impl Default for ImvOptions {
 impl Default for ImvConfig {
     fn default() -> Self {
         let mut binds = HashMap::new();
-        binds.insert("q".into(),                "quit".into());
-        binds.insert("<Left>".into(),           "prev; pan 0 0".into());
-        binds.insert("<Right>".into(),          "next; pan 0 0".into());
-        binds.insert("j".into(),                "pan 0 -50".into());
-        binds.insert("k".into(),                "pan 0 50".into());
-        binds.insert("<Shift+J>".into(),        "pan 0 -500".into());
-        binds.insert("<Shift+K>".into(),        "pan 0 500".into());
-        binds.insert("h".into(),                "pan 50 0".into());
-        binds.insert("l".into(),                "pan -50 0".into());
-        binds.insert("<Up>".into(),             "zoom 1".into());
-        binds.insert("<Down>".into(),           "zoom -1".into());
-        binds.insert("f".into(),                "fullscreen".into());
-        binds.insert("<scroll-up>".into(),      "pan 0 50".into());
-        binds.insert("<scroll-down>".into(),    "pan 0 -50".into());
-        binds.insert("<shift-scroll-up>".into(),   "pan 0 500".into());
+        binds.insert("q".into(), "quit".into());
+        binds.insert("<Left>".into(), "prev; pan 0 0".into());
+        binds.insert("<Right>".into(), "next; pan 0 0".into());
+        binds.insert("j".into(), "pan 0 -50".into());
+        binds.insert("k".into(), "pan 0 50".into());
+        binds.insert("<Shift+J>".into(), "pan 0 -500".into());
+        binds.insert("<Shift+K>".into(), "pan 0 500".into());
+        binds.insert("h".into(), "pan 50 0".into());
+        binds.insert("l".into(), "pan -50 0".into());
+        binds.insert("<Up>".into(), "zoom 1".into());
+        binds.insert("<Down>".into(), "zoom -1".into());
+        binds.insert("f".into(), "fullscreen".into());
+        binds.insert("<scroll-up>".into(), "pan 0 50".into());
+        binds.insert("<scroll-down>".into(), "pan 0 -50".into());
+        binds.insert("<shift-scroll-up>".into(), "pan 0 500".into());
         binds.insert("<shift-scroll-down>".into(), "pan 0 -500".into());
-        Self { binary: "imv".into(), options: ImvOptions::default(), binds }
+        Self {
+            binary: "imv".into(),
+            options: ImvOptions::default(),
+            binds,
+        }
     }
 }
 
@@ -432,7 +519,10 @@ impl ImvConfig {
         s.push_str(&format!("initial_pan = {}\n", self.options.initial_pan));
         s.push_str(&format!("scaling_mode = {}\n", self.options.scaling_mode));
         s.push_str(&format!("pan_limits = {}\n", self.options.pan_limits));
-        s.push_str(&format!("suppress_default_binds = {}\n", self.options.suppress_default_binds));
+        s.push_str(&format!(
+            "suppress_default_binds = {}\n",
+            self.options.suppress_default_binds
+        ));
         s.push_str("\n[binds]\n");
         // Sort keys for deterministic output
         let mut pairs: Vec<_> = self.binds.iter().collect();
@@ -451,35 +541,35 @@ impl ImvConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RvConfig {
-    pub binary:            String,
-    pub scroll_speed:      u32,
+    pub binary: String,
+    pub scroll_speed: u32,
     pub fast_scroll_speed: u32,
-    pub fullscreen:        bool,
-    pub binds:             HashMap<String, String>,
+    pub fullscreen: bool,
+    pub binds: HashMap<String, String>,
 }
 
 impl Default for RvConfig {
     fn default() -> Self {
         let mut binds = HashMap::new();
-        binds.insert("q".into(),      "quit".into());
-        binds.insert("j".into(),      "scroll_down".into());
-        binds.insert("k".into(),      "scroll_up".into());
-        binds.insert("J".into(),      "fast_scroll_down".into());
-        binds.insert("K".into(),      "fast_scroll_up".into());
-        binds.insert("space".into(),  "page_down".into());
-        binds.insert("g".into(),      "top".into());
-        binds.insert("G".into(),      "bottom".into());
-        binds.insert("up".into(),     "zoom_in".into());
-        binds.insert("down".into(),   "zoom_out".into());
+        binds.insert("q".into(), "quit".into());
+        binds.insert("j".into(), "scroll_down".into());
+        binds.insert("k".into(), "scroll_up".into());
+        binds.insert("J".into(), "fast_scroll_down".into());
+        binds.insert("K".into(), "fast_scroll_up".into());
+        binds.insert("space".into(), "page_down".into());
+        binds.insert("g".into(), "top".into());
+        binds.insert("G".into(), "bottom".into());
+        binds.insert("up".into(), "zoom_in".into());
+        binds.insert("down".into(), "zoom_out".into());
         binds.insert("equals".into(), "zoom_reset".into());
-        binds.insert("f".into(),      "fullscreen".into());
-        binds.insert("h".into(),      "pan_left".into());
-        binds.insert("l".into(),      "pan_right".into());
+        binds.insert("f".into(), "fullscreen".into());
+        binds.insert("h".into(), "pan_left".into());
+        binds.insert("l".into(), "pan_right".into());
         Self {
-            binary:            "rv".into(),
-            scroll_speed:      80,
+            binary: "rv".into(),
+            scroll_speed: 80,
             fast_scroll_speed: 600,
-            fullscreen:        true,
+            fullscreen: true,
             binds,
         }
     }
@@ -511,12 +601,11 @@ impl RvConfig {
 
 /// Load config from config.toml, searching CWD then ~/.config/mrm/.
 pub fn load_config() -> Result<Config> {
-    let path = find_config_path()
-        .with_context(|| "config.toml not found in CWD or ~/.config/mrm/")?;
+    let path =
+        find_config_path().with_context(|| "config.toml not found in CWD or ~/.config/mrm/")?;
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    parse_config(&contents)
-        .with_context(|| format!("Invalid config file: {}", path.display()))
+    parse_config(&contents).with_context(|| format!("Invalid config file: {}", path.display()))
 }
 
 /// Parse and validate config text. The TOML error (with line/column) is kept
@@ -557,42 +646,65 @@ mod db_url_tests {
 
     #[test]
     fn env_wins() {
-        let db = DbConfig { url_file: Some("/nonexistent".into()) };
-        assert_eq!(resolve_database_url(Some("postgres://e".into()), &db, std::path::Path::new("/")).unwrap(), "postgres://e");
+        let db = DbConfig {
+            url_file: Some("/nonexistent".into()),
+        };
+        assert_eq!(
+            resolve_database_url(Some("postgres://e".into()), &db, std::path::Path::new("/"))
+                .unwrap(),
+            "postgres://e"
+        );
     }
 
     #[test]
     fn reads_relative_file_trimmed() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "db_url", "postgres://u:p@h:5433/mrm\n", 0o600);
-        let db = DbConfig { url_file: Some("db_url".into()) };
-        assert_eq!(resolve_database_url(None, &db, d.path()).unwrap(), "postgres://u:p@h:5433/mrm");
+        let db = DbConfig {
+            url_file: Some("db_url".into()),
+        };
+        assert_eq!(
+            resolve_database_url(None, &db, d.path()).unwrap(),
+            "postgres://u:p@h:5433/mrm"
+        );
     }
 
     #[test]
     fn refuses_group_or_world_readable() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "db_url", "postgres://x", 0o644);
-        let db = DbConfig { url_file: Some("db_url".into()) };
-        let e = resolve_database_url(None, &db, d.path()).unwrap_err().to_string();
+        let db = DbConfig {
+            url_file: Some("db_url".into()),
+        };
+        let e = resolve_database_url(None, &db, d.path())
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("chmod 600"), "{e}");
     }
 
     #[test]
     fn missing_config_is_explained() {
-        let e = resolve_database_url(None, &DbConfig::default(), std::path::Path::new("/")).unwrap_err().to_string();
+        let e = resolve_database_url(None, &DbConfig::default(), std::path::Path::new("/"))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("url_file"), "{e}");
     }
 
     #[test]
     fn config_without_db_section_parses() {
-        let c: Config = toml::from_str("[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n").unwrap();
+        let c: Config = toml::from_str(
+            "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n",
+        )
+        .unwrap();
         assert!(c.db.url_file.is_none());
     }
 
     #[test]
     fn zero_poll_interval_is_rejected() {
-        let e = parse_config("[notifications]\nenabled = false\npoll_interval_minutes = 0\n[sources]\n").unwrap_err();
+        let e = parse_config(
+            "[notifications]\nenabled = false\npoll_interval_minutes = 0\n[sources]\n",
+        )
+        .unwrap_err();
         assert!(format!("{e:#}").contains("poll_interval_minutes"), "{e:#}");
     }
 
@@ -605,7 +717,10 @@ mod db_url_tests {
 
     #[test]
     fn valid_config_parses_via_parse_config() {
-        let c = parse_config("[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n").unwrap();
+        let c = parse_config(
+            "[notifications]\nenabled = false\npoll_interval_minutes = 30\n[sources]\n",
+        )
+        .unwrap();
         assert_eq!(c.notifications.poll_interval_minutes, 30);
     }
 }

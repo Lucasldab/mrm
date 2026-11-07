@@ -53,11 +53,7 @@ pub async fn dispatch(cfg: &NtfyConfig, summary: &str, body: &str, click: Option
         return;
     }
 
-    let url = format!(
-        "{}/{}",
-        cfg.server.trim_end_matches('/'),
-        cfg.topic.trim(),
-    );
+    let url = format!("{}/{}", cfg.server.trim_end_matches('/'), cfg.topic.trim(),);
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -109,7 +105,10 @@ mod tests {
 
     #[test]
     fn redacts_server_with_port_and_credentials() {
-        assert_eq!(redact_server("http://user:pw@10.0.0.1:8080/x"), "10.0.0.1:8080");
+        assert_eq!(
+            redact_server("http://user:pw@10.0.0.1:8080/x"),
+            "10.0.0.1:8080"
+        );
     }
 
     #[test]
@@ -132,12 +131,17 @@ mod tests {
             let (mut sock, _) = l.accept().await.unwrap();
             let mut buf = vec![0u8; 8192];
             let n = sock.read(&mut buf).await.unwrap();
-            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
             String::from_utf8_lossy(&buf[..n]).to_lowercase()
         });
         let cfg = NtfyConfig {
-            enabled: true, server: format!("http://127.0.0.1:{port}"), topic: "t".into(),
-            priority: None, auth_token: None,
+            enabled: true,
+            server: format!("http://127.0.0.1:{port}"),
+            topic: "t".into(),
+            priority: None,
+            auth_token: None,
         };
         dispatch(&cfg, "s", "b", Some("mrmphone://series/7")).await;
         let req = got.await.unwrap();
