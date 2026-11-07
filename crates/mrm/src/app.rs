@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use crate::cover_cache::CoverCache;
-use crate::scraper::{Registry, SearchResult, SeriesData};
+use crate::scraper::{search_registry, source_unavailable, Registry, SearchResult, SeriesData};
 use crate::types::{AppEvent, Chapter, Discovery, Manhwa, Screen, SortMode, Status};
 use crate::db;
 
@@ -699,12 +699,7 @@ impl App {
         } else if k == self.keys.mark_unread() {
             if let Some(ch) = self.chapter_list.get(self.chapter_sel) {
                 let chapter_id = ch.id;
-                sqlx::query(
-                    "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = $1",
-                )
-                .bind(chapter_id)
-                .execute(&self.pool)
-                .await?;
+                db::mark_chapter_unread(&self.pool, chapter_id).await?;
                 db::recompute_status(&self.pool, manhwa_id).await?;
                 self.refresh_detail(manhwa_id).await?;
                 self.set_msg("Marked as unread");
@@ -1702,11 +1697,6 @@ impl App {
 // Spawned-task helpers
 // ---------------------------------------------------------------------------
 
-/// Status text for a source that is not in the registry.
-fn source_unavailable(source: &str) -> String {
-    format!("Source '{source}' is disabled or unknown (see [sources] in config.toml)")
-}
-
 /// Tracks the one in-flight search: `start` hands out a sequence number,
 /// `finish` accepts only the current one, so a cancelled or superseded
 /// search's late result is dropped.
@@ -1741,29 +1731,6 @@ impl SearchJob {
     pub fn running(&self) -> bool {
         self.current.is_some()
     }
-}
-
-/// Search every source in the registry concurrently. Results are merged in a
-/// fixed source order; failures become "Source: error" strings.
-async fn search_registry(registry: &Registry, query: &str) -> (Vec<SearchResult>, Vec<String>) {
-    let mut names: Vec<&'static str> = registry.keys().copied().collect();
-    if names.is_empty() {
-        return (Vec::new(), vec!["No sources enabled in config.toml".into()]);
-    }
-    names.sort_by_key(|n| (crate::scraper::source_rank(n), *n));
-    let outcomes = futures::future::join_all(
-        names.iter().map(|n| registry[*n].search(query)),
-    ).await;
-
-    let mut merged = Vec::new();
-    let mut errors = Vec::new();
-    for (name, outcome) in names.iter().zip(outcomes) {
-        match outcome {
-            Ok(r)  => merged.extend(r),
-            Err(e) => errors.push(format!("{}: {e}", crate::scraper::source_label(name))),
-        }
-    }
-    (merged, errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,24 +1774,15 @@ async fn fetch_chapter_images(
         return;
     }
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30));
-
-    // AsuraScans' CDN rejects non-browser requests and hotlinked fetches.
-    // Send a realistic Chrome UA plus a Referer so the CDN treats us like
-    // an in-page image request.
-    // Every source gets the chapter URL as Referer (many CDNs hotlink-check).
-    client_builder = if source == "asura" {
-        client_builder.user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        )
-    } else {
-        client_builder.user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+    let client = match crate::scraper::image_client(source) {
+        Ok(c)  => Arc::new(c),
+        Err(e) => {
+            let _ = err_tx.send(format!("Could not load chapter: {e}")).await;
+            let _ = tx.send(None).await;
+            return;
+        }
     };
     let referer: Arc<str> = Arc::from(chapter_url);
-
-    let client = Arc::new(client_builder.build().expect("reqwest client"));
     let sem = Arc::new(Semaphore::new(4));
 
     // Each task returns (index, Option<PathBuf>) — None = this index failed.
@@ -1841,10 +1799,8 @@ async fn fetch_chapter_images(
         let handle = set.spawn(async move {
             let result = async {
                 let _permit = sem.acquire_owned().await.ok()?;
-                let resp = client.get(&url)
-                    .header(reqwest::header::REFERER, &*referer)
-                    .send().await.ok()?
-                    .error_for_status().ok()?;
+                let resp = crate::scraper::fetch_image(&client, &url, Some(&referer))
+                    .await.ok()?;
                 let bytes = resp.bytes().await.ok()?;
                 // Validation, file write and any fallback decode are blocking work.
                 tokio::task::spawn_blocking(move || save_page(&bytes, &session_dir, page))

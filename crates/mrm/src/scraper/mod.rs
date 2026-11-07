@@ -143,6 +143,69 @@ pub fn source_label(name: &str) -> &str {
     }
 }
 
+/// Status text for a source that is not in the registry.
+pub fn source_unavailable(source: &str) -> String {
+    format!("Source '{source}' is disabled or unknown (see [sources] in config.toml)")
+}
+
+/// Search every source in the registry concurrently. Results are merged in a
+/// fixed source order; failures become "Source: error" strings.
+pub async fn search_registry(registry: &Registry, query: &str) -> (Vec<SearchResult>, Vec<String>) {
+    let mut names: Vec<&'static str> = registry.keys().copied().collect();
+    if names.is_empty() {
+        return (Vec::new(), vec!["No sources enabled in config.toml".into()]);
+    }
+    names.sort_by_key(|n| (source_rank(n), *n));
+    let outcomes = futures::future::join_all(
+        names.iter().map(|n| registry[*n].search(query)),
+    ).await;
+
+    let mut merged = Vec::new();
+    let mut errors = Vec::new();
+    for (name, outcome) in names.iter().zip(outcomes) {
+        match outcome {
+            Ok(r)  => merged.extend(r),
+            Err(e) => errors.push(format!("{}: {e}", source_label(name))),
+        }
+    }
+    (merged, errors)
+}
+
+// ---------------------------------------------------------------------------
+// Page image fetching (shared by the TUI reader and `mrm --serve`)
+// ---------------------------------------------------------------------------
+
+/// HTTP client for page/cover images of `source`. AsuraScans' CDN rejects
+/// non-browser requests, so Asura gets a realistic Chrome UA; everyone else
+/// a short browser-ish one.
+pub fn image_client(source: &str) -> reqwest::Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30));
+    let builder = if source == "asura" {
+        builder.user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        )
+    } else {
+        builder.user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+    };
+    builder.build()
+}
+
+/// GET one image with `client` from [`image_client`]. Pages pass the chapter
+/// URL as Referer (many CDNs hotlink-check); a non-success status is an error.
+pub async fn fetch_image(
+    client: &reqwest::Client,
+    url: &str,
+    referer: Option<&str>,
+) -> reqwest::Result<reqwest::Response> {
+    let mut req = client.get(url);
+    if let Some(r) = referer {
+        req = req.header(reqwest::header::REFERER, r);
+    }
+    req.send().await?.error_for_status()
+}
+
 // ---------------------------------------------------------------------------
 // HTML image helper
 // ---------------------------------------------------------------------------

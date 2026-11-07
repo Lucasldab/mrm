@@ -558,6 +558,18 @@ pub async fn update_scroll(
     Ok(pct >= 1.0 && !was_completed)
 }
 
+/// Undo a chapter's completion (the Detail screen's mark-unread); the
+/// progress row itself stays.
+pub async fn mark_chapter_unread(pool: &PgPool, chapter_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE progress SET completed_at = NULL, scrolled_pct = 0.0 WHERE chapter_id = $1",
+    )
+    .bind(chapter_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Refresh stored title/cover/pub_status/description from a freshly scraped
 /// SeriesData. Used by the "refresh metadata" action on the detail screen.
 pub async fn update_manhwa_metadata(
