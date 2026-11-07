@@ -101,6 +101,7 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             m.description,
             m.last_error,
             m.failing_since::text AS failing_since,
+            m.chapter_conflict,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -133,6 +134,7 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             total:           total.max(0) as u32,
             last_error:      row.try_get("last_error")?,
             failing_since:   row.try_get("failing_since")?,
+            chapter_conflict: row.try_get("chapter_conflict")?,
         });
     }
 
@@ -146,6 +148,7 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
             m.id, m.title, m.cover_url, m.source, m.source_url,
             m.pub_status, m.status, m.status_override, m.description,
             m.last_error, m.failing_since::text AS failing_since,
+            m.chapter_conflict,
             COUNT(c.id)           AS total_chapters,
             COUNT(p.completed_at) AS read_chapters
         FROM manhwa m
@@ -177,6 +180,7 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
         total:           total.max(0) as u32,
         last_error:      row.try_get("last_error")?,
         failing_since:   row.try_get("failing_since")?,
+        chapter_conflict: row.try_get("chapter_conflict")?,
     })
 }
 
@@ -242,9 +246,11 @@ pub async fn insert_manhwa_with_chapters(
     .await?;
 
     let manhwa_id: i64 = row.try_get("id")?;
+    let (chapters, note) = crate::scraper::resolve_collisions(series.chapters.clone(), &Default::default());
+    set_conflict_conn(&mut tx, manhwa_id, note.as_deref()).await?;
 
     // Upsert all chapters within the same transaction
-    for ch in &series.chapters {
+    for ch in &chapters {
         sqlx::query(
             r#"
             INSERT INTO chapter (manhwa_id, number, title, url, released_at, notified_at)
@@ -363,6 +369,29 @@ pub async fn chapter_source(pool: &PgPool, chapter_id: i64) -> Result<Option<(St
 // Chapter upsert (coordinator writes)
 // ---------------------------------------------------------------------------
 
+/// number bits -> stored URL, for resolve_collisions.
+async fn stored_urls_conn(conn: &mut PgConnection, manhwa_id: i64) -> Result<std::collections::HashMap<u64, String>> {
+    let rows = sqlx::query("SELECT number, url FROM chapter WHERE manhwa_id = $1")
+        .bind(manhwa_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for r in rows {
+        let n: f64 = r.try_get("number")?;
+        map.insert(n.to_bits(), r.try_get::<String, _>("url")?);
+    }
+    Ok(map)
+}
+
+async fn set_conflict_conn(conn: &mut PgConnection, manhwa_id: i64, note: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE manhwa SET chapter_conflict = $1 WHERE id = $2")
+        .bind(note)
+        .bind(manhwa_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// Upsert a batch inside the caller's transaction. Returns how many rows were
 /// newly inserted (`xmax = 0` is true only for the INSERT path of an upsert).
 /// New rows start with notified_at NULL; updates never touch notified_at.
@@ -396,17 +425,21 @@ async fn upsert_chapters_conn(
     Ok(inserted)
 }
 
-/// One poll result for one series, atomically: chapters, pub_status, and the
-/// status recompute (only when something it depends on changed). A crash
-/// mid-way leaves nothing half-written (SCAN.md risks 1 and 3).
-pub async fn apply_poll_result(
+/// One poll result for one series, atomically: chapters (number collisions
+/// resolved in favour of the stored chapter), pub_status, the conflict note
+/// and the status recompute (only when something it depends on changed). A
+/// crash mid-way leaves nothing half-written (SCAN.md risks 1 and 3).
+pub async fn apply_poll_result_noted(
     pool: &PgPool,
     manhwa_id: i64,
     series: &crate::scraper::SeriesData,
     old_pub_status: &str,
-) -> Result<usize> {
+) -> Result<(usize, Option<String>)> {
     let mut tx = pool.begin().await?;
-    let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &series.chapters).await?;
+    let stored = stored_urls_conn(&mut tx, manhwa_id).await?;
+    let (chapters, note) = crate::scraper::resolve_collisions(series.chapters.clone(), &stored);
+    let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &chapters).await?;
+    set_conflict_conn(&mut tx, manhwa_id, note.as_deref()).await?;
     // Follow a source-side move (Asura reports its post-redirect URL), so the
     // stored URL doesn't depend on the redirect chain staying alive. Skipped
     // when another library row already holds the new URL (UNIQUE).
@@ -436,7 +469,17 @@ pub async fn apply_poll_result(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(inserted)
+    Ok((inserted, note))
+}
+
+/// `apply_poll_result_noted` without the note.
+pub async fn apply_poll_result(
+    pool: &PgPool,
+    manhwa_id: i64,
+    series: &crate::scraper::SeriesData,
+    old_pub_status: &str,
+) -> Result<usize> {
+    Ok(apply_poll_result_noted(pool, manhwa_id, series, old_pub_status).await?.0)
 }
 
 /// Longest stored poll error, in characters.
@@ -1252,6 +1295,53 @@ pub(crate) mod tests {
         let ok: bool = sqlx::query_scalar("SELECT last_ok_at IS NOT NULL FROM manhwa WHERE id = $1")
             .bind(id).fetch_one(&pool).await.unwrap();
         assert!(ok, "success stamps last_ok_at");
+    }
+
+    #[tokio::test]
+    async fn a_colliding_chapter_never_replaces_the_stored_one() {
+        let pool = pool_or_skip!();
+        let url = "https://m/manga/reset";
+        let id = insert_manhwa_with_chapters(&pool, &series(2, url), "mangack").await.unwrap();
+        let ch1 = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 1.0).unwrap();
+        mark_read_through(&pool, id, 1.0).await.unwrap();
+
+        // Season 2 chapter 1 appears, listed first (newest first).
+        let mut s = series(2, url);
+        s.chapters.insert(0, ch(1.0, &format!("{url}/s2")));
+        let (inserted, note) = apply_poll_result_noted(&pool, id, &s, "ongoing").await.unwrap();
+        assert_eq!(inserted, 0);
+        assert!(note.as_deref().unwrap_or("").contains("2 chapters share no. 1"));
+
+        let after = fetch_chapters(&pool, id).await.unwrap().into_iter().find(|c| c.number == 1.0).unwrap();
+        assert_eq!(after.id, ch1.id);
+        assert_eq!(after.url, ch1.url, "stored URL was overwritten");
+        assert!(after.completed, "read mark moved");
+        assert!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict.is_some());
+
+        // A clean poll clears the note.
+        apply_poll_result(&pool, id, &series(2, url), "ongoing").await.unwrap();
+        assert_eq!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict, None);
+    }
+
+    #[tokio::test]
+    async fn a_moved_chapter_url_still_updates() {
+        let pool = pool_or_skip!();
+        let id = insert_manhwa_with_chapters(&pool, &series(1, "https://a/comics/s-aaaaaaaa"), "asura").await.unwrap();
+        let moved = series(1, "https://a/comics/s-bbbbbbbb");
+        let (_, note) = apply_poll_result_noted(&pool, id, &moved, "ongoing").await.unwrap();
+        assert_eq!(note, None);
+        let c = &fetch_chapters(&pool, id).await.unwrap()[0];
+        assert!(c.url.starts_with("https://a/comics/s-bbbbbbbb"), "{}", c.url);
+    }
+
+    #[tokio::test]
+    async fn adding_a_series_with_a_collision_records_it() {
+        let pool = pool_or_skip!();
+        let mut s = series(2, "https://m/manga/new-reset");
+        s.chapters.push(ch(2.0, "https://m/manga/new-reset/s2"));
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangack").await.unwrap();
+        assert_eq!(fetch_chapters(&pool, id).await.unwrap().len(), 2);
+        assert!(fetch_manhwa(&pool, id).await.unwrap().chapter_conflict.is_some());
     }
 
     #[tokio::test]

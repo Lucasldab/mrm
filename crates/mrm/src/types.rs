@@ -138,6 +138,9 @@ pub struct Manhwa {
     pub last_error:  Option<String>,
     /// When the current run of failed polls started, as Postgres text.
     pub failing_since: Option<String>,
+    /// Set while the latest poll saw two chapters with one number (M10 guard
+    /// rails); shown as ⚠. None otherwise.
+    pub chapter_conflict: Option<String>,
 }
 
 impl Manhwa {
