@@ -43,3 +43,8 @@ tempfile   = "3"
 tracing    = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm", "image-defaults"] }
+# `mrm --serve` (HTTP API for mrm-phone).
+axum       = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+
+[dev-dependencies]
+tower      = { version = "0.5", features = ["util"] }

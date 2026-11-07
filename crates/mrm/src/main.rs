@@ -7,6 +7,7 @@ mod notifier;
 #[cfg(feature = "ntfy")]
 mod ntfy;
 mod scraper;
+mod serve;
 mod types;
 mod ui;
 
@@ -67,6 +68,7 @@ fn startup_cleanup_tmp() {
 enum Mode {
     Tui,
     Daemon,
+    Serve,
     Once,
     Import { path: String, dry_run: bool },
 }
@@ -76,6 +78,7 @@ fn parse_args() -> Mode {
     for arg in &args[1..] {
         match arg.as_str() {
             "--daemon" | "-d" => return Mode::Daemon,
+            "--serve"         => return Mode::Serve,
             "--once"          => return Mode::Once,
             "--import"        => {
                 let rest = &args[2..];
@@ -91,6 +94,7 @@ fn parse_args() -> Mode {
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --daemon, -d  Run as background poller (no TUI)");
+                eprintln!("  --serve       Serve the JSON API for mrm-phone (MRM_SERVE_ADDR, default {})", serve::DEFAULT_ADDR);
                 eprintln!("  --once        Poll once and exit");
                 eprintln!("  --import FILE [--dry-run]");
                 eprintln!("                Add series by title, one per line: `title<TAB>read through chapter`");
@@ -122,6 +126,7 @@ async fn main() -> Result<()> {
 
     match mode {
         Mode::Daemon => run_daemon(pool, config).await,
+        Mode::Serve  => run_serve(pool, config).await,
         Mode::Once   => run_once(pool, config).await,
         Mode::Import { path, dry_run } => {
             let registry = scraper::build_registry(&config);
@@ -156,6 +161,24 @@ async fn run_daemon(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
 
     eprintln!("mrm: daemon stopped");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Serve mode: JSON API for mrm-phone, no poller, no notifications
+// ---------------------------------------------------------------------------
+
+async fn run_serve(pool: sqlx::PgPool, config: config::Config) -> Result<()> {
+    warn_unknown_sources(&config);
+    let token = serve::read_token(&serve::token_path()?)?;
+    let addr = std::env::var("MRM_SERVE_ADDR").unwrap_or_else(|_| serve::DEFAULT_ADDR.to_string());
+    let state = serve::AppState::new(
+        pool,
+        Arc::new(scraper::build_registry(&config)),
+        Arc::new(serve::HttpFetcher::default()),
+        token,
+        &serve::cache_root()?,
+    );
+    serve::run(state, &addr).await
 }
 
 /// How long quitting waits for an in-flight poll before aborting it.
