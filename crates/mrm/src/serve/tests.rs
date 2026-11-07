@@ -218,10 +218,11 @@ fn keys(v: &Value) -> Vec<String> {
     k
 }
 
-const SERIES_KEYS: [&str; 10] = [
+const SERIES_KEYS: [&str; 11] = [
     "cover",
     "failing",
     "id",
+    "latest_release",
     "note",
     "pub_status",
     "source",
@@ -368,8 +369,8 @@ async fn library_shape_and_order() {
         list[0],
         json!({
             "id": b, "title": "Series https://x/b", "source": "mangadex", "status": "paused",
-            "pub_status": "ongoing", "unread": 2, "total": 2, "cover": format!("/api/series/{b}/cover"),
-            "failing": false, "note": null,
+            "pub_status": "ongoing", "unread": 2, "total": 2, "latest_release": "2026-11-05",
+            "cover": format!("/api/series/{b}/cover"), "failing": false, "note": null,
         })
     );
     assert_eq!(

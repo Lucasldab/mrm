@@ -134,6 +134,9 @@ pub struct Manhwa {
     pub description: Option<String>,
     pub unread: u32, // computed, not stored
     pub total: u32,  // chapter count, computed
+    /// Release date (YYYY-MM-DD) of the newest dated chapter; computed. None
+    /// when no chapter carries a date in that form.
+    pub latest_release: Option<String>,
     /// Last poll error while the series is failing (None once a poll works).
     pub last_error: Option<String>,
     /// When the current run of failed polls started, as Postgres text.
