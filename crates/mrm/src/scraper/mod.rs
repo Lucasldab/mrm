@@ -36,6 +36,54 @@ pub struct ChapterData {
     pub released_at: Option<String>,  // "YYYY-MM-DD" or None
 }
 
+/// Several different chapters with one number (a season or volume restarting
+/// at 1). Keep one per number — the URL already stored for it, else the first
+/// listed — so a reset never overwrites a stored chapter and its read mark.
+/// Exact duplicate URLs are not a conflict. Returns the kept chapters (page
+/// order) and a note for the series' ⚠ line, or None when nothing collided.
+pub fn resolve_collisions(
+    chapters: Vec<ChapterData>,
+    stored: &HashMap<u64, String>,
+) -> (Vec<ChapterData>, Option<String>) {
+    let mut urls: HashMap<u64, Vec<String>> = HashMap::new();
+    let mut order: Vec<u64> = Vec::new();
+    for c in &chapters {
+        let key = c.number.to_bits();
+        let list = urls.entry(key).or_insert_with(|| { order.push(key); Vec::new() });
+        if !list.contains(&c.url) {
+            list.push(c.url.clone());
+        }
+    }
+    let mut keep: HashMap<u64, String> = HashMap::new();
+    let mut conflicts: Vec<(f64, usize, String)> = Vec::new();
+    for key in &order {
+        let list = &urls[key];
+        let chosen = stored.get(key).filter(|s| list.contains(s)).cloned()
+            .unwrap_or_else(|| list[0].clone());
+        if list.len() > 1 {
+            conflicts.push((f64::from_bits(*key), list.len(), chosen.clone()));
+        }
+        keep.insert(*key, chosen);
+    }
+    let mut out = Vec::with_capacity(keep.len());
+    for c in chapters {
+        let key = c.number.to_bits();
+        if keep.get(&key) == Some(&c.url) {
+            keep.remove(&key);
+            out.push(c);
+        }
+    }
+    let note = conflicts.first().map(|(n, count, url)| {
+        let path = url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| &r[i..])).unwrap_or(url);
+        let mut s = format!("{count} chapters share no. {n} (season reset?): keeping {path}");
+        if conflicts.len() > 1 {
+            s.push_str(&format!(" (+{} more numbers)", conflicts.len() - 1));
+        }
+        s
+    });
+    (out, note)
+}
+
 /// One result from a search() call.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -629,5 +677,70 @@ mod tests {
     fn mangack_scraper_instantiates() {
         let scraper = MangackScraper::new();
         assert_eq!(scraper.source_name(), "mangack");
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    fn ch(n: f64, url: &str) -> ChapterData {
+        ChapterData { number: n, title: None, url: url.into(), released_at: None }
+    }
+
+    #[test]
+    fn stored_url_wins_a_season_reset_either_order() {
+        let stored = HashMap::from([(1f64.to_bits(), "https://m/chapter/x-chapter-1/".to_string())]);
+        for page in [
+            vec![ch(1.0, "https://m/chapter/x-s2-chapter-1/"), ch(2.0, "https://m/chapter/x-chapter-2/"), ch(1.0, "https://m/chapter/x-chapter-1/")],
+            vec![ch(1.0, "https://m/chapter/x-chapter-1/"), ch(2.0, "https://m/chapter/x-chapter-2/"), ch(1.0, "https://m/chapter/x-s2-chapter-1/")],
+        ] {
+            let (kept, note) = resolve_collisions(page, &stored);
+            assert_eq!(kept.len(), 2);
+            assert!(kept.iter().any(|c| c.url == "https://m/chapter/x-chapter-1/"));
+            assert!(!kept.iter().any(|c| c.url.contains("s2")));
+            let note = note.expect("collision must be reported");
+            assert!(note.contains("2 chapters share no. 1"), "{note}");
+            assert!(note.contains("/chapter/x-chapter-1/"), "{note}");
+        }
+    }
+
+    #[test]
+    fn without_a_stored_url_the_first_listed_wins() {
+        let (kept, note) = resolve_collisions(
+            vec![ch(1.0, "https://m/a-1"), ch(1.0, "https://m/b-1")], &HashMap::new());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].url, "https://m/a-1");
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn same_url_twice_is_not_a_conflict() {
+        let (kept, note) = resolve_collisions(
+            vec![ch(3.0, "https://m/c-3"), ch(3.0, "https://m/c-3")], &HashMap::new());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn a_moved_url_alone_is_not_a_conflict() {
+        // Asura hash rotation: the stored URL is gone from the page.
+        let stored = HashMap::from([(5f64.to_bits(), "https://a/comics/s-aaaaaaaa/chapter/5".to_string())]);
+        let (kept, note) = resolve_collisions(
+            vec![ch(5.0, "https://a/comics/s-bbbbbbbb/chapter/5")], &stored);
+        assert_eq!(kept[0].url, "https://a/comics/s-bbbbbbbb/chapter/5");
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn several_colliding_numbers_give_one_note() {
+        let (kept, note) = resolve_collisions(vec![
+            ch(1.0, "https://m/a-1"), ch(1.0, "https://m/b-1"),
+            ch(2.0, "https://m/a-2"), ch(2.0, "https://m/b-2"), ch(2.0, "https://m/c-2"),
+        ], &HashMap::new());
+        assert_eq!(kept.len(), 2);
+        let note = note.unwrap();
+        assert!(note.starts_with("2 chapters share no. 1"), "{note}");
+        assert!(note.ends_with("(+1 more numbers)"), "{note}");
     }
 }
