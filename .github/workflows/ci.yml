@@ -1,0 +1,53 @@
+# Format, lint and test on every push to main and every pull request.
+#
+# The toolchain is pinned so a new Rust release cannot turn CI red through a new
+# lint when nothing in the repo changed. Bump it on purpose.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+          cache-workspaces: crates/mrm
+          rustflags: ""
+
+      - name: Check formatting
+        working-directory: crates/mrm
+        run: cargo fmt --all -- --check
+
+      # --all-features so the optional ntfy path is linted too.
+      - name: Run clippy
+        working-directory: crates/mrm
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # scripts/with-test-pg starts its own throwaway cluster and needs the
+      # server binaries on PATH, which Debian-based systems keep out of it.
+      - name: Install Postgres
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql
+          ls -d /usr/lib/postgresql/*/bin | tail -1 >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: make test
