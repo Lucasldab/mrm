@@ -112,7 +112,9 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             m.failing_since::text AS failing_since,
             m.chapter_conflict,
             COUNT(c.id)           AS total_chapters,
-            COUNT(p.completed_at) AS read_chapters
+            COUNT(p.completed_at) AS read_chapters,
+            LEFT(MAX(c.released_at) FILTER (WHERE c.released_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'), 10)
+                                  AS latest_release
         FROM manhwa m
         LEFT JOIN chapter  c ON c.manhwa_id = m.id
         LEFT JOIN progress p ON p.chapter_id = c.id
@@ -141,6 +143,7 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             description: row.try_get("description").unwrap_or(None),
             unread,
             total: total.max(0) as u32,
+            latest_release: row.try_get("latest_release")?,
             last_error: row.try_get("last_error")?,
             failing_since: row.try_get("failing_since")?,
             chapter_conflict: row.try_get("chapter_conflict")?,
@@ -159,7 +162,9 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
             m.last_error, m.failing_since::text AS failing_since,
             m.chapter_conflict,
             COUNT(c.id)           AS total_chapters,
-            COUNT(p.completed_at) AS read_chapters
+            COUNT(p.completed_at) AS read_chapters,
+            LEFT(MAX(c.released_at) FILTER (WHERE c.released_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'), 10)
+                                  AS latest_release
         FROM manhwa m
         LEFT JOIN chapter  c ON c.manhwa_id = m.id
         LEFT JOIN progress p ON p.chapter_id = c.id
@@ -187,6 +192,7 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
         description: row.try_get("description").unwrap_or(None),
         unread,
         total: total.max(0) as u32,
+        latest_release: row.try_get("latest_release")?,
         last_error: row.try_get("last_error")?,
         failing_since: row.try_get("failing_since")?,
         chapter_conflict: row.try_get("chapter_conflict")?,
@@ -1035,6 +1041,35 @@ pub(crate) mod tests {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name <> '_sqlx_migrations'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(n, 6);
+    }
+
+    #[tokio::test]
+    async fn latest_release_is_the_newest_dated_chapter() {
+        let pool = pool_or_skip!();
+        let mut s = series(3, "https://x/dated");
+        s.chapters[0].released_at = Some("2026-10-30".into());
+        s.chapters[1].released_at = Some("2026-11-02T08:00:00Z".into());
+        // Not a date: must not win the text comparison.
+        s.chapters[2].released_at = Some("yesterday".into());
+        let dated = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+
+        let mut u = series(1, "https://x/undated");
+        u.chapters[0].released_at = None;
+        let undated = insert_manhwa_with_chapters(&pool, &u, "mangadex")
+            .await
+            .unwrap();
+
+        let m = fetch_manhwa(&pool, dated).await.unwrap();
+        assert_eq!(m.latest_release.as_deref(), Some("2026-11-02"));
+        assert_eq!(
+            fetch_manhwa(&pool, undated).await.unwrap().latest_release,
+            None
+        );
+        let all = fetch_all_manhwa(&pool).await.unwrap();
+        let listed = all.iter().find(|x| x.id == dated).unwrap();
+        assert_eq!(listed.latest_release.as_deref(), Some("2026-11-02"));
     }
 
     #[tokio::test]

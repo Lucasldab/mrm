@@ -387,6 +387,9 @@ pub struct Series {
     pub_status: String,
     unread: u32,
     total: u32,
+    /// Release date (YYYY-MM-DD) of the newest dated chapter, for the phone's
+    /// "new" sort. Older app builds ignore it.
+    latest_release: Option<String>,
     cover: String,
     failing: bool,
     note: Option<String>,
@@ -403,6 +406,7 @@ impl From<&Manhwa> for Series {
             pub_status: m.pub_status.clone(),
             unread: m.unread,
             total: m.total,
+            latest_release: m.latest_release.clone(),
             cover: format!("/api/series/{}/cover", m.id),
             failing,
             note: if failing { m.last_error.clone() } else { None },
