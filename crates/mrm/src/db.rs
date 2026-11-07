@@ -130,6 +130,7 @@ pub async fn fetch_all_manhwa(pool: &PgPool) -> Result<Vec<Manhwa>> {
             status_override: row.try_get::<bool, _>("status_override")?,
             description:     row.try_get("description").unwrap_or(None),
             unread,
+            total:           total.max(0) as u32,
             last_error:      row.try_get("last_error")?,
             failing_since:   row.try_get("failing_since")?,
         });
@@ -173,6 +174,7 @@ pub async fn fetch_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<Manhwa> {
         status_override: row.try_get::<bool, _>("status_override")?,
         description:     row.try_get("description").unwrap_or(None),
         unread,
+        total:           total.max(0) as u32,
         last_error:      row.try_get("last_error")?,
         failing_since:   row.try_get("failing_since")?,
     })
@@ -266,6 +268,14 @@ pub async fn insert_manhwa_with_chapters(
     Ok(manhwa_id)
 }
 
+/// Id of the library row with this exact source URL, if any.
+pub async fn manhwa_id_by_source_url(pool: &PgPool, source_url: &str) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar("SELECT id FROM manhwa WHERE source_url = $1")
+        .bind(source_url)
+        .fetch_optional(pool)
+        .await?)
+}
+
 /// Delete a manhwa and all associated chapters and progress records.
 /// Relies on ON DELETE CASCADE (confirmed in schema).
 pub async fn delete_manhwa(pool: &PgPool, manhwa_id: i64) -> Result<()> {
@@ -328,6 +338,25 @@ pub async fn fetch_chapters(pool: &PgPool, manhwa_id: i64) -> Result<Vec<Chapter
         .collect();
 
     chapters
+}
+
+/// The series a chapter belongs to, or None for an unknown chapter id.
+pub async fn chapter_manhwa_id(pool: &PgPool, chapter_id: i64) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar("SELECT manhwa_id FROM chapter WHERE id = $1")
+        .bind(chapter_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// (series source, chapter URL) for a chapter id: what the image fetch needs.
+pub async fn chapter_source(pool: &PgPool, chapter_id: i64) -> Result<Option<(String, String)>> {
+    let row = sqlx::query(
+        "SELECT m.source, c.url FROM chapter c JOIN manhwa m ON m.id = c.manhwa_id WHERE c.id = $1",
+    )
+    .bind(chapter_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| Ok((r.try_get("source")?, r.try_get("url")?))).transpose()
 }
 
 // ---------------------------------------------------------------------------

@@ -133,6 +133,7 @@ pub struct Manhwa {
     pub status_override: bool,
     pub description: Option<String>,
     pub unread:      u32,      // computed, not stored
+    pub total:       u32,      // chapter count, computed
     /// Last poll error while the series is failing (None once a poll works).
     pub last_error:  Option<String>,
     /// When the current run of failed polls started, as Postgres text.
