@@ -90,6 +90,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     if let Some(health) = health_line(manhwa.failing_since.as_deref(), manhwa.last_error.as_deref()) {
         lines.push(Line::from(Span::styled(format!("  {health}"), Style::default().fg(theme.error()))));
     }
+    if let Some(conflict) = conflict_line(manhwa.chapter_conflict.as_deref()) {
+        lines.push(Line::from(Span::styled(format!("  {conflict}"), Style::default().fg(theme.error()))));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -108,6 +111,11 @@ pub(crate) fn health_line(failing_since: Option<&str>, last_error: Option<&str>)
     let date = since.get(..10).unwrap_or(since);
     let err = last_error.unwrap_or("unknown error");
     Some(format!("⚠ failing since {date}: {err}"))
+}
+
+/// "⚠ <note>" while the latest poll saw two chapters with one number.
+pub(crate) fn conflict_line(note: Option<&str>) -> Option<String> {
+    note.map(|n| format!("⚠ {n}"))
 }
 
 fn draw_description(f: &mut Frame, app: &App, area: Rect) {
@@ -222,6 +230,15 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conflict_line_shows_the_note() {
+        assert_eq!(conflict_line(None), None);
+        assert_eq!(
+            conflict_line(Some("2 chapters share no. 1 (season reset?): keeping /chapter/x-1")).as_deref(),
+            Some("⚠ 2 chapters share no. 1 (season reset?): keeping /chapter/x-1"),
+        );
+    }
+
     use super::*;
 
     #[test]

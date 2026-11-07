@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         status: m.status.clone(),
         unread: m.unread,
         status_display: m.status_display(),
-        failing: m.failing_since.is_some(),
+        failing: m.failing_since.is_some() || m.chapter_conflict.is_some(),
     }).collect();
 
     // Split: main grid | right sidebar (keybinds)

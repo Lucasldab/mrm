@@ -202,8 +202,14 @@ async fn poll_all(
         };
         streaks.succeeded(&manhwa.source);
 
-        let new_count = match db::apply_poll_result(pool, manhwa.id, &series, &manhwa.pub_status).await {
-            Ok(n) => n,
+        let new_count = match db::apply_poll_result_noted(pool, manhwa.id, &series, &manhwa.pub_status).await {
+            Ok((n, note)) => {
+                if let Some(note) = &note {
+                    log!("mrm: '{}' chapter conflict: {note}", manhwa.title);
+                }
+                health_changed |= note != manhwa.chapter_conflict;
+                n
+            }
             Err(e) => {
                 log!("mrm: poll write error for '{}': {e}", manhwa.title);
                 continue;
