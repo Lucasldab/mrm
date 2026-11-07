@@ -482,7 +482,7 @@ fn parse_chapter_links(
     series_slug: Option<&str>,
 ) -> Vec<ChapterData> {
     let mut chapters = Vec::new();
-    let mut seen_numbers: HashSet<u64> = HashSet::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
 
     for element in document.select(&SEL_A_CHAPTER) {
         let href = match element.value().attr("href") {
@@ -529,12 +529,11 @@ fn parse_chapter_links(
             None => continue,
         };
 
-        // Deduplicate by number using bit representation
-        let key = number.to_bits();
-        if seen_numbers.contains(&key) {
+        // The same link twice (desktop + mobile lists) is one chapter. Equal
+        // numbers on different links are kept: resolve_collisions decides.
+        if !seen_urls.insert(href.clone()) {
             continue;
         }
-        seen_numbers.insert(key);
 
         // Date: get all text from parent, subtract the chapter label and "NEW"
         let released_at = extract_chapter_date(&element, &raw_label, now);
@@ -759,6 +758,20 @@ mod tests {
     fn fixed_now() -> chrono::DateTime<Utc> {
         // 2024-06-15 12:00:00 UTC — fixed reference for deterministic assertions
         Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn same_number_different_links_both_come_through() {
+        let html = r#"<html><body><h1>X</h1>
+            <a href="https://mangack.com/chapter/x-chapter-1-s2/">Chapter 1</a>
+            <a href="https://mangack.com/chapter/x-chapter-2/">Chapter 2</a>
+            <a href="https://mangack.com/chapter/x-chapter-1/">Chapter 1</a>
+            <a href="https://mangack.com/chapter/x-chapter-1/">Chapter 1</a>
+        </body></html>"#;
+        let s = parse_series_page(html, "https://mangack.com/manga/x/").unwrap();
+        let ones: Vec<&str> = s.chapters.iter().filter(|c| c.number == 1.0).map(|c| c.url.as_str()).collect();
+        assert_eq!(ones.len(), 2, "{ones:?}");
+        assert_eq!(s.chapters.len(), 3, "the repeated link counts once");
     }
 
     // --- parse_relative_date ---

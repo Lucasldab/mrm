@@ -483,7 +483,6 @@ fn parse_chapter_links(tree: &Html, series_path_prefix: &str) -> Vec<ChapterData
     };
 
     let mut chapters = Vec::new();
-    let mut seen_numbers: HashSet<u64> = HashSet::new();
     let mut seen_urls:    HashSet<String> = HashSet::new();
 
     for a in tree.select(&sel) {
@@ -505,8 +504,6 @@ fn parse_chapter_links(tree: &Html, series_path_prefix: &str) -> Vec<ChapterData
             Some(n) => n,
             None    => continue,
         };
-        let bits = number.to_bits();
-        if !seen_numbers.insert(bits) { continue; }
 
         let title = a
             .select(&SEL_TRUNCATE_SPAN)
@@ -550,6 +547,18 @@ fn urlencoding_minimal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chapter_links_keep_equal_numbers_with_different_paths() {
+        let html = r#"<html><body>
+            <a href="/comics/x-1a2b3c4d/chapter/1"><span class="truncate">Chapter 1</span></a>
+            <a href="/comics/x-1a2b3c4d/chapter/1?season=2"><span class="truncate">Chapter 1</span></a>
+            <a href="/comics/x-1a2b3c4d/chapter/1"><span class="truncate">Chapter 1</span></a>
+        </body></html>"#;
+        let tree = Html::parse_document(html);
+        let chapters = parse_chapter_links(&tree, "/comics/x-1a2b3c4d");
+        assert_eq!(chapters.len(), 2);
+    }
 
     #[test]
     fn series_path_and_slug_ignore_query_and_fragment() {
