@@ -374,9 +374,11 @@ mod help_tests {
 
     #[test]
     fn library_help_uses_the_configured_delete_key() {
-        let mut keys = KeysConfig::default();
-        keys.delete = "X".into();
-        keys.poll_now = "P".into();
+        let keys = KeysConfig {
+            delete: "X".into(),
+            poll_now: "P".into(),
+            ..Default::default()
+        };
         let t = text(&Screen::Library, &keys);
         assert!(t.contains("X X"), "{t}");
         assert!(t.contains("P Check sources"), "{t}");
@@ -385,9 +387,11 @@ mod help_tests {
 
     #[test]
     fn detail_help_lists_mark_read_unread_and_refresh() {
-        let mut keys = KeysConfig::default();
-        keys.mark_read = "m".into();
-        keys.mark_unread = "n".into();
+        let keys = KeysConfig {
+            mark_read: "m".into(),
+            mark_unread: "n".into(),
+            ..Default::default()
+        };
         let t = text(&Screen::Detail { manhwa_id: 1 }, &keys);
         assert!(t.contains("m Mark chapter read"), "{t}");
         assert!(t.contains("n Mark chapter unread"), "{t}");

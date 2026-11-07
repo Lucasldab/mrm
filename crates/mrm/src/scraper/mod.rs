@@ -119,6 +119,9 @@ pub struct DiscoveryEntry {
 // Scraper trait
 // ---------------------------------------------------------------------------
 
+// async_trait marks its generated futures #[must_use], which clippy reports
+// as doubled on the code the macro writes, not on anything written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Scraper: Send + Sync {
     /// Unique source identifier (e.g. "mangadex").

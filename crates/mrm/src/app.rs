@@ -75,9 +75,7 @@ pub(crate) struct HostFullscreen {
 }
 
 fn snapshot_host_fullscreen() -> Option<HostFullscreen> {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
-        return None;
-    }
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
     let out = std::process::Command::new("hyprctl")
         .args(["activewindow", "-j"])
         .output()
@@ -116,6 +114,9 @@ fn restore_host_fullscreen(h: &HostFullscreen) {
         .status();
 }
 
+/// What the image fetcher sends to the reader.
+type ImageMessage = Option<(usize, Option<std::path::PathBuf>)>;
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -144,7 +145,7 @@ pub struct App {
     pub current_chapter: Option<Chapter>,
     pub images_loading: bool,
     pub image_paths: Vec<std::path::PathBuf>,
-    pub image_rx: Option<mpsc::Receiver<Option<(usize, Option<std::path::PathBuf>)>>>,
+    pub image_rx: Option<mpsc::Receiver<ImageMessage>>,
     pub image_pending: Vec<(usize, Option<std::path::PathBuf>)>,
     pub next_expected_image: usize,
     pub viewer_process: Option<ManagedChild>,
@@ -230,7 +231,6 @@ pub struct App {
     pub grid_cols: usize,
 
     // Config
-    pub config: crate::config::Config,
     pub keys: crate::config::KeysConfig,
     pub theme: crate::config::ThemeConfig,
     pub imv_config: crate::config::ImvConfig,
@@ -327,7 +327,6 @@ impl App {
             imv_config: config.imv.clone(),
             rv_config: config.rv.clone(),
             viewer_kind: config.viewer_kind(),
-            config,
             pending_g: false,
             show_help: false,
         })
@@ -349,9 +348,7 @@ impl App {
         };
 
         match self.sort_mode {
-            SortMode::Title => {
-                list.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            }
+            SortMode::Title => list.sort_by_key(|a| a.title.to_lowercase()),
             SortMode::Unread => {
                 list.sort_by(|a, b| b.unread.cmp(&a.unread).then(a.title.cmp(&b.title)))
             }
@@ -1051,10 +1048,8 @@ impl App {
             if count > 0 {
                 self.do_add_discovery();
             }
-        } else if k == KeyCode::Char('x') {
-            if count > 0 {
-                self.do_dismiss_discovery().await?;
-            }
+        } else if k == KeyCode::Char('x') && count > 0 {
+            self.do_dismiss_discovery().await?;
         }
         Ok(())
     }
@@ -1236,7 +1231,7 @@ impl App {
                 .unwrap_or_default();
             let registry = self.registry.clone();
             let url = ch.url.clone();
-            let (tx, rx) = mpsc::channel::<Option<(usize, Option<std::path::PathBuf>)>>(32);
+            let (tx, rx) = mpsc::channel::<ImageMessage>(32);
             let (err_tx, err_rx) = mpsc::channel::<String>(4);
             self.image_rx = Some(rx);
             self.error_rx = Some(err_rx);
@@ -1896,7 +1891,7 @@ async fn fetch_chapter_images(
     source: &str,
     chapter_url: &str,
     session_dir: std::path::PathBuf,
-    tx: mpsc::Sender<Option<(usize, Option<std::path::PathBuf>)>>,
+    tx: mpsc::Sender<ImageMessage>,
     err_tx: mpsc::Sender<String>,
 ) {
     use tokio::sync::Semaphore;
