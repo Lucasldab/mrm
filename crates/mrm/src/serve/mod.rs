@@ -214,6 +214,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/series/{id}/refresh", post(refresh))
         .route("/series/{id}/cover", get(cover))
         .route("/chapters/{id}/read", post(set_read))
+        .route("/chapters/{id}/read-through", post(set_read_through))
         .route("/chapters/{id}/pages", get(pages))
         .route("/chapters/{id}/pages/{n}", get(page))
         .route("/search", get(search))
@@ -607,6 +608,31 @@ async fn set_read(
     Ok(Json(ReadOut {
         chapter_id: id,
         read: body.read,
+        series,
+    }))
+}
+
+#[derive(Serialize)]
+struct ReadThroughOut {
+    chapter_id: i64,
+    marked: u64,
+    series: Series,
+}
+
+/// Mark every chapter numbered up to this one read; later chapters are left alone.
+async fn set_read_through(
+    State(st): St,
+    ApiPath(id): ApiPath<i64>,
+) -> ApiResult<Json<ReadThroughOut>> {
+    let (manhwa_id, number) = db::chapter_position(&st.pool, id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("chapter not found"))?;
+    let marked = db::mark_read_through(&st.pool, manhwa_id, number).await?;
+    db::recompute_status(&st.pool, manhwa_id).await?;
+    let series = Series::from(&fetch_series(&st, manhwa_id).await?);
+    Ok(Json(ReadThroughOut {
+        chapter_id: id,
+        marked,
         series,
     }))
 }

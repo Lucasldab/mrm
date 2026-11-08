@@ -416,6 +416,57 @@ async fn series_detail_lists_chapters_ascending() {
 // --- read / unread / status -------------------------------------------------
 
 #[tokio::test]
+async fn read_through_marks_up_to_the_chapter_and_leaves_later_ones() {
+    let Some(h) = with_db(&[]).await else { return };
+    let id = h.add(6, "https://x/through").await;
+    let chs = h.chapter_ids(id).await;
+    let uri = format!("/api/chapters/{}/read-through", chs[3]);
+
+    let r = h.post(&uri, json!({})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let v = r.json();
+    assert_eq!(keys(&v), sorted(vec!["chapter_id", "marked", "series"]));
+    assert_eq!(
+        (&v["chapter_id"], &v["marked"], &v["series"]["unread"]),
+        (&json!(chs[3]), &json!(4), &json!(2))
+    );
+    let completed: Vec<bool> = db::fetch_chapters(&h.pool, id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|c| c.completed)
+        .collect();
+    assert_eq!(completed, vec![true, true, true, true, false, false]);
+
+    assert_eq!(h.post(&uri, json!({})).await.json()["marked"], json!(0));
+
+    let r = h.post("/api/chapters/999999/read-through", json!({})).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn read_through_keeps_a_later_chapter_already_read() {
+    let Some(h) = with_db(&[]).await else { return };
+    let id = h.add(6, "https://x/through-later").await;
+    let chs = h.chapter_ids(id).await;
+    h.post(
+        &format!("/api/chapters/{}/read", chs[5]),
+        json!({ "read": true }),
+    )
+    .await;
+
+    let v = h
+        .post(&format!("/api/chapters/{}/read-through", chs[1]), json!({}))
+        .await
+        .json();
+    assert_eq!(
+        (&v["marked"], &v["series"]["unread"]),
+        (&json!(2), &json!(3))
+    );
+    assert!(db::fetch_chapters(&h.pool, id).await.unwrap()[5].completed);
+}
+
+#[tokio::test]
 async fn read_unread_round_trip_changes_completed_and_status() {
     let Some(h) = with_db(&[]).await else { return };
     let id = h.add(6, "https://x/r").await;
