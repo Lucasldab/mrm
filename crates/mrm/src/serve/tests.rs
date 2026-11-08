@@ -517,6 +517,37 @@ async fn status_endpoint_is_the_picker() {
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 }
 
+// --- delete -------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_removes_the_series_and_its_chapters() {
+    let Some(h) = with_db(&[]).await else { return };
+    let id = h.add(3, "https://x/del").await;
+    let keep = h.add(1, "https://x/keep").await;
+    let chapters = h.chapter_ids(id).await;
+    let uri = format!("/api/series/{id}");
+
+    let r = h.call(Method::DELETE, &uri, Some(TOKEN), None).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    assert_eq!(h.get(&uri).await.status, StatusCode::NOT_FOUND);
+    for c in chapters {
+        let r = h.get(&format!("/api/chapters/{c}/pages")).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "chapter {c} cascades");
+    }
+    assert_eq!(
+        h.get(&format!("/api/series/{keep}")).await.status,
+        StatusCode::OK,
+        "other series untouched"
+    );
+
+    let again = h.call(Method::DELETE, &uri, Some(TOKEN), None).await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    let anon = h
+        .call(Method::DELETE, &format!("/api/series/{keep}"), None, None)
+        .await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED);
+}
+
 // --- refresh / add ----------------------------------------------------------
 
 #[tokio::test]

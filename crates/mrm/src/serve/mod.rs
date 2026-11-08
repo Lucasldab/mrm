@@ -209,7 +209,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/library", get(library))
         .route("/series", post(add_series))
-        .route("/series/{id}", get(series_detail))
+        .route("/series/{id}", get(series_detail).delete(delete_series))
         .route("/series/{id}/status", post(set_status))
         .route("/series/{id}/refresh", post(refresh))
         .route("/series/{id}/cover", get(cover))
@@ -534,6 +534,26 @@ async fn set_status(
     fetch_series(&st, id).await?;
     db::apply_picker_status(&st.pool, id, chosen).await?;
     Ok(Json(Series::from(&fetch_series(&st, id).await?)))
+}
+
+/// Remove a series from the library, like the TUI's `d`: chapters and read
+/// state go with it (ON DELETE CASCADE), and so do its cached cover, page
+/// lists and pages, since ids may be reused.
+async fn delete_series(State(st): St, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
+    fetch_series(&st, id).await?;
+    let chapters = db::fetch_chapters(&st.pool, id).await?;
+    db::delete_manhwa(&st.pool, id).await?;
+    st.covers.remove(&[id]).await;
+    {
+        let mut lists = st.page_lists.lock().unwrap_or_else(|e| e.into_inner());
+        for c in &chapters {
+            lists.remove(&c.id);
+        }
+    }
+    for c in &chapters {
+        let _ = tokio::fs::remove_dir_all(st.pages.path(&[c.id])).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// One poll of the series, like the TUI's `R` on the Detail screen: new
