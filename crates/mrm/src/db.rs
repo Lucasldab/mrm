@@ -370,6 +370,16 @@ pub async fn chapter_manhwa_id(pool: &PgPool, chapter_id: i64) -> Result<Option<
     )
 }
 
+/// (series id, chapter number) for a chapter id.
+pub async fn chapter_position(pool: &PgPool, chapter_id: i64) -> Result<Option<(i64, f64)>> {
+    Ok(
+        sqlx::query_as("SELECT manhwa_id, number FROM chapter WHERE id = $1")
+            .bind(chapter_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 /// (series source, chapter URL) for a chapter id: what the image fetch needs.
 pub async fn chapter_source(pool: &PgPool, chapter_id: i64) -> Result<Option<(String, String)>> {
     let row = sqlx::query(
