@@ -20,7 +20,7 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 
 ## Requirements
 
-- Rust 1.88+ (the highest `rust-version` declared by the direct dependencies I checked: ratatui 0.30 = 1.88, ratatui-image = 1.86, rquest 5 = 1.85; sqlx 0.7 declares none; transitive crates not exhaustively checked)
+- Rust 1.88+ (the highest `rust-version` declared by the direct dependencies I checked: ratatui 0.30 = 1.88, ratatui-image = 1.86, rquest 5 = 1.85; sqlx 0.8 declares none; transitive crates not exhaustively checked)
 - PostgreSQL 14+ (see [Database](#database))
 - cmake and clang (see [Build dependencies](#build-dependencies))
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
