@@ -263,26 +263,9 @@ pub async fn insert_manhwa_with_chapters(
         crate::scraper::resolve_collisions(series.chapters.clone(), &Default::default());
     set_conflict_conn(&mut tx, manhwa_id, note.as_deref()).await?;
 
-    // Upsert all chapters within the same transaction
-    for ch in &chapters {
-        sqlx::query(
-            r#"
-            INSERT INTO chapter (manhwa_id, number, title, url, released_at, notified_at)
-            VALUES ($1, $2, $3, $4, $5, now())
-            ON CONFLICT(manhwa_id, number) DO UPDATE SET
-                title       = excluded.title,
-                url         = excluded.url,
-                released_at = excluded.released_at
-            "#,
-        )
-        .bind(manhwa_id)
-        .bind(ch.number)
-        .bind(&ch.title)
-        .bind(&ch.url)
-        .bind(&ch.released_at)
-        .execute(&mut *tx)
-        .await?;
-    }
+    // Upsert all chapters within the same transaction. Chapters of a series
+    // added by hand are already known: mark them announced.
+    upsert_chapters_conn(&mut tx, manhwa_id, &chapters, true).await?;
 
     tx.commit().await?;
     Ok(manhwa_id)
@@ -426,39 +409,77 @@ async fn set_conflict_conn(
     Ok(())
 }
 
-/// Upsert a batch inside the caller's transaction. Returns how many rows were
-/// newly inserted (`xmax = 0` is true only for the INSERT path of an upsert).
-/// New rows start with notified_at NULL; updates never touch notified_at.
+/// Upsert a batch inside the caller's transaction, in one statement. Returns
+/// how many rows were newly inserted (`xmax = 0` is true only for the INSERT
+/// path of an upsert). Rows whose title, url and released_at are unchanged are
+/// not rewritten. New rows start with notified_at NULL, or now() when
+/// `announced`; updates never touch notified_at.
 async fn upsert_chapters_conn(
     conn: &mut PgConnection,
     manhwa_id: i64,
     chapters: &[crate::scraper::ChapterData],
+    announced: bool,
 ) -> Result<usize> {
-    let mut inserted = 0usize;
-    for ch in chapters {
-        let new: bool = sqlx::query_scalar(
-            r#"
-            INSERT INTO chapter (manhwa_id, number, title, url, released_at)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (manhwa_id, number) DO UPDATE SET
-                title       = excluded.title,
-                url         = excluded.url,
-                released_at = excluded.released_at
-            RETURNING (xmax = 0)
-            "#,
-        )
-        .bind(manhwa_id)
-        .bind(ch.number)
-        .bind(&ch.title)
-        .bind(&ch.url)
-        .bind(&ch.released_at)
-        .fetch_one(&mut *conn)
-        .await?;
-        if new {
-            inserted += 1;
+    let chapters = last_per_number(chapters);
+    if chapters.is_empty() {
+        return Ok(0);
+    }
+    let numbers: Vec<f64> = chapters.iter().map(|c| c.number).collect();
+    let titles: Vec<Option<String>> = chapters.iter().map(|c| c.title.clone()).collect();
+    let urls: Vec<String> = chapters.iter().map(|c| c.url.clone()).collect();
+    let released: Vec<Option<String>> = chapters.iter().map(|c| c.released_at.clone()).collect();
+    let new: Vec<bool> = sqlx::query_scalar(
+        r#"
+        INSERT INTO chapter (manhwa_id, number, title, url, released_at, notified_at)
+        SELECT $1, u.number, u.title, u.url, u.released_at,
+               CASE WHEN $6 THEN now() END
+        FROM UNNEST($2::float8[], $3::text[], $4::text[], $5::text[])
+             AS u(number, title, url, released_at)
+        ON CONFLICT (manhwa_id, number) DO UPDATE SET
+            title       = excluded.title,
+            url         = excluded.url,
+            released_at = excluded.released_at
+        WHERE (chapter.title, chapter.url, chapter.released_at)
+              IS DISTINCT FROM (excluded.title, excluded.url, excluded.released_at)
+        RETURNING (xmax = 0)
+        "#,
+    )
+    .bind(manhwa_id)
+    .bind(&numbers)
+    .bind(&titles)
+    .bind(&urls)
+    .bind(&released)
+    .bind(announced)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(new.into_iter().filter(|&n| n).count())
+}
+
+/// One chapter per number as Postgres compares them (0.0 = -0.0, NaN = NaN),
+/// the last one winning, as row-by-row upserts would leave it. A single
+/// INSERT .. ON CONFLICT DO UPDATE fails if two of its rows hit the same key.
+fn last_per_number(chapters: &[crate::scraper::ChapterData]) -> Vec<&crate::scraper::ChapterData> {
+    fn key(n: f64) -> u64 {
+        if n == 0.0 {
+            0
+        } else if n.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            n.to_bits()
         }
     }
-    Ok(inserted)
+    let mut pos: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut out: Vec<&crate::scraper::ChapterData> = Vec::with_capacity(chapters.len());
+    for c in chapters {
+        match pos.get(&key(c.number)) {
+            Some(&i) => out[i] = c,
+            None => {
+                pos.insert(key(c.number), out.len());
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// One poll result for one series, atomically: chapters (number collisions
@@ -474,7 +495,7 @@ pub async fn apply_poll_result_noted(
     let mut tx = pool.begin().await?;
     let stored = stored_urls_conn(&mut tx, manhwa_id).await?;
     let (chapters, note) = crate::scraper::resolve_collisions(series.chapters.clone(), &stored);
-    let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &chapters).await?;
+    let inserted = upsert_chapters_conn(&mut tx, manhwa_id, &chapters, false).await?;
     set_conflict_conn(&mut tx, manhwa_id, note.as_deref()).await?;
     // Follow a source-side move (Asura reports its post-redirect URL), so the
     // stored URL doesn't depend on the redirect chain staying alive. Skipped
@@ -1291,6 +1312,94 @@ pub(crate) mod tests {
         assert_eq!(
             fetch_manhwa(&pool, id).await.unwrap().pub_status,
             "completed"
+        );
+    }
+
+    /// (number, ctid, notified) per chapter: ctid moves when a row is rewritten.
+    async fn chapter_rows(pool: &PgPool, id: i64) -> Vec<(f64, String, bool)> {
+        sqlx::query_as(
+            "SELECT number, ctid::text, notified_at IS NOT NULL FROM chapter \
+             WHERE manhwa_id = $1 ORDER BY number",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn poll_upsert_counts_inserts_and_leaves_unchanged_rows_alone() {
+        let pool = pool_or_skip!();
+        let mut s = series(4, "https://x/batch");
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+        let before = chapter_rows(&pool, id).await;
+        assert!(before.iter().all(|r| r.2), "added chapters start announced");
+
+        // Same data again: nothing inserted, no row rewritten.
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            0
+        );
+        assert_eq!(chapter_rows(&pool, id).await, before);
+
+        // One changed title, two new chapters: only those three rows move.
+        s.chapters[1].title = Some("Renamed".into());
+        s.chapters.push(ch(5.0, "https://x/batch"));
+        s.chapters.push(ch(6.0, "https://x/batch"));
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            2
+        );
+        let after = chapter_rows(&pool, id).await;
+        assert_eq!(after.len(), 6);
+        assert_eq!(after[0], before[0]);
+        assert_ne!(after[1].1, before[1].1, "changed row was updated");
+        assert!(after[1].2, "an update keeps notified_at");
+        assert_eq!(after[2], before[2]);
+        assert_eq!(after[3], before[3]);
+        assert!(!after[4].2 && !after[5].2, "polled chapters await a claim");
+        let chs = fetch_chapters(&pool, id).await.unwrap();
+        assert_eq!(chs[1].title.as_deref(), Some("Renamed"));
+
+        // A cleared title is a change too (NULL-safe comparison).
+        s.chapters[1].title = None;
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            0
+        );
+        let chs = fetch_chapters(&pool, id).await.unwrap();
+        assert_eq!(chs[1].title, None);
+        let claimed = claim_unnotified(&pool).await.unwrap();
+        assert_eq!(claimed.len(), 1, "one push for the series");
+    }
+
+    #[tokio::test]
+    async fn upsert_tolerates_numbers_postgres_considers_equal() {
+        let pool = pool_or_skip!();
+        let mut s = series(0, "https://x/zero");
+        s.chapters = vec![ch(0.0, "https://x/zero"), ch(-0.0, "https://x/zero-neg")];
+        s.chapters[1].url = "https://x/zero/neg".into();
+        // resolve_collisions keys by bits, so both survive it; the single
+        // statement must not see the same key twice.
+        let id = insert_manhwa_with_chapters(&pool, &s, "mangadex")
+            .await
+            .unwrap();
+        let chs = fetch_chapters(&pool, id).await.unwrap();
+        assert_eq!(chs.len(), 1);
+        assert_eq!(chs[0].url, "https://x/zero/neg", "last one wins");
+        assert_eq!(
+            apply_poll_result(&pool, id, &s, "ongoing").await.unwrap(),
+            0
+        );
+        let mut empty = series(0, "https://x/zero");
+        empty.chapters.clear();
+        assert_eq!(
+            apply_poll_result(&pool, id, &empty, "ongoing")
+                .await
+                .unwrap(),
+            0
         );
     }
 
