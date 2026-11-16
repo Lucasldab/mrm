@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::db;
 use crate::notifier;
-use crate::scraper::Registry;
+use crate::scraper::{Registry, Scraper};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -154,14 +154,13 @@ async fn poll_all(
     let manhwa_list = db::fetch_all_manhwa(pool).await?;
     log!("mrm: checking {} manhwa", manhwa_list.len());
 
-    let mut updated_titles: Vec<String> = Vec::new();
-    let mut streaks = SourceStreaks::default();
-    // A ⚠ marker appeared or cleared: the TUI should reload its list.
-    let mut health_changed = false;
-
-    for manhwa in &manhwa_list {
+    // Sources are polled concurrently, each one's series in list order, so a
+    // site sees no more traffic than before while a slow or blocked source no
+    // longer holds up the others.
+    let mut by_source: Vec<(&dyn Scraper, Vec<Queued>)> = Vec::new();
+    for (i, manhwa) in manhwa_list.iter().enumerate() {
         let scraper = match registry.get(manhwa.source.as_str()) {
-            Some(s) => s,
+            Some(s) => s.as_ref(),
             None => {
                 log!(
                     "mrm: no scraper for source '{}', skipping '{}'",
@@ -171,68 +170,31 @@ async fn poll_all(
                 continue;
             }
         };
-        if streaks.skip(&manhwa.source) {
-            log!(
-                "mrm: skipping '{}': {} failed {SOURCE_FAILURE_LIMIT} times in a row this poll",
-                manhwa.title,
-                manhwa.source
-            );
-            continue;
-        }
-
-        // Fetch latest series data (scraper has built-in retry). Shutdown
-        // wins over a slow source.
-        let fetched = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                log!("mrm: poll interrupted by shutdown");
-                return Ok(());
-            }
-            r = scraper.get_series(&manhwa.source_url) => r,
-        };
-        let series = match fetched {
-            Ok(s) => s,
-            Err(e) => {
-                log!("mrm: failed to fetch '{}': {e:#}", manhwa.title);
-                streaks.failed(&manhwa.source);
-                let msg = format!("{e:#}");
-                match db::record_poll_failure(pool, manhwa.id, &msg).await {
-                    // Reload the TUI only when the ⚠ appears or its text
-                    // changes, not on every poll of a series that stays down.
-                    Ok(()) => {
-                        health_changed |= manhwa.failing_since.is_none()
-                            || manhwa.last_error.as_deref() != Some(msg.as_str())
-                    }
-                    Err(db_err) => log!(
-                        "mrm: could not record failure for '{}': {db_err}",
-                        manhwa.title
-                    ),
-                }
-                continue;
-            }
-        };
-        streaks.succeeded(&manhwa.source);
-
-        let new_count =
-            match db::apply_poll_result_noted(pool, manhwa.id, &series, &manhwa.pub_status).await {
-                Ok((n, note)) => {
-                    if let Some(note) = &note {
-                        log!("mrm: '{}' chapter conflict: {note}", manhwa.title);
-                    }
-                    health_changed |= note != manhwa.chapter_conflict;
-                    n
-                }
-                Err(e) => {
-                    log!("mrm: poll write error for '{}': {e}", manhwa.title);
-                    continue;
-                }
-            };
-        health_changed |= manhwa.failing_since.is_some();
-        if new_count > 0 {
-            log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
-            updated_titles.push(manhwa.title.clone());
+        match by_source
+            .iter_mut()
+            .find(|(_, list)| list[0].1.source == manhwa.source)
+        {
+            Some((_, list)) => list.push((i, manhwa)),
+            None => by_source.push((scraper, vec![(i, manhwa)])),
         }
     }
+
+    let results = futures::future::join_all(
+        by_source
+            .into_iter()
+            .map(|(scraper, list)| poll_source(pool, scraper, list, shutdown, quiet)),
+    )
+    .await;
+
+    // Titles in list order, as the sequential poll reported them.
+    let mut updated: Vec<(usize, String)> = Vec::new();
+    let mut health_changed = false;
+    for r in results {
+        updated.extend(r.updated);
+        health_changed |= r.health_changed;
+    }
+    updated.sort_by_key(|(i, _)| *i);
+    let updated_titles: Vec<String> = updated.into_iter().map(|(_, t)| t).collect();
 
     if shutdown.is_cancelled() {
         return Ok(());
@@ -288,6 +250,99 @@ async fn poll_all(
 
     log!("mrm: poll complete");
     Ok(())
+}
+
+/// A series waiting in its source's queue, with its position in the poll.
+type Queued<'a> = (usize, &'a crate::types::Manhwa);
+
+/// What one source's share of a poll changed.
+#[derive(Default)]
+struct SourcePoll {
+    /// (position in the poll's list, title) of series with new chapters.
+    updated: Vec<(usize, String)>,
+    /// A ⚠ marker appeared or cleared: the TUI should reload its list.
+    health_changed: bool,
+}
+
+/// Poll one source's series one after another, stopping at shutdown or once
+/// the source has failed `SOURCE_FAILURE_LIMIT` times in a row.
+async fn poll_source(
+    pool: &PgPool,
+    scraper: &dyn Scraper,
+    list: Vec<Queued<'_>>,
+    shutdown: &CancellationToken,
+    quiet: bool,
+) -> SourcePoll {
+    macro_rules! log {
+        ($($arg:tt)*) => { if !quiet { eprintln!($($arg)*); } };
+    }
+    let mut out = SourcePoll::default();
+    let mut streaks = SourceStreaks::default();
+
+    for (i, manhwa) in list {
+        if streaks.skip(&manhwa.source) {
+            log!(
+                "mrm: skipping '{}': {} failed {SOURCE_FAILURE_LIMIT} times in a row this poll",
+                manhwa.title,
+                manhwa.source
+            );
+            continue;
+        }
+
+        // Fetch latest series data (scraper has built-in retry). Shutdown
+        // wins over a slow source.
+        let fetched = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                log!("mrm: poll interrupted by shutdown");
+                return out;
+            }
+            r = scraper.get_series(&manhwa.source_url) => r,
+        };
+        let series = match fetched {
+            Ok(s) => s,
+            Err(e) => {
+                log!("mrm: failed to fetch '{}': {e:#}", manhwa.title);
+                streaks.failed(&manhwa.source);
+                let msg = format!("{e:#}");
+                match db::record_poll_failure(pool, manhwa.id, &msg).await {
+                    // Reload the TUI only when the ⚠ appears or its text
+                    // changes, not on every poll of a series that stays down.
+                    Ok(()) => {
+                        out.health_changed |= manhwa.failing_since.is_none()
+                            || manhwa.last_error.as_deref() != Some(msg.as_str())
+                    }
+                    Err(db_err) => log!(
+                        "mrm: could not record failure for '{}': {db_err}",
+                        manhwa.title
+                    ),
+                }
+                continue;
+            }
+        };
+        streaks.succeeded(&manhwa.source);
+
+        let new_count =
+            match db::apply_poll_result_noted(pool, manhwa.id, &series, &manhwa.pub_status).await {
+                Ok((n, note)) => {
+                    if let Some(note) = &note {
+                        log!("mrm: '{}' chapter conflict: {note}", manhwa.title);
+                    }
+                    out.health_changed |= note != manhwa.chapter_conflict;
+                    n
+                }
+                Err(e) => {
+                    log!("mrm: poll write error for '{}': {e}", manhwa.title);
+                    continue;
+                }
+            };
+        out.health_changed |= manhwa.failing_since.is_some();
+        if new_count > 0 {
+            log!("mrm: '{}' +{} new chapter(s)", manhwa.title, new_count);
+            out.updated.push((i, manhwa.title.clone()));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +633,146 @@ mod tests {
             rx.try_recv().is_err(),
             "same error again: nothing changed for the TUI"
         );
+    }
+
+    /// A source that records its calls and the most it ever had in flight.
+    /// Its first call waits at `meet` until another source's first call
+    /// arrives there too, which only happens if sources poll concurrently.
+    struct RecordingScraper {
+        name: &'static str,
+        meet: Arc<tokio::sync::Barrier>,
+        calls: std::sync::Mutex<Vec<String>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecordingScraper {
+        fn new(name: &'static str, meet: Arc<tokio::sync::Barrier>) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                meet,
+                calls: Default::default(),
+                in_flight: Default::default(),
+                max_in_flight: Default::default(),
+            })
+        }
+    }
+
+    struct Shared(Arc<RecordingScraper>);
+
+    #[async_trait]
+    impl Scraper for Shared {
+        fn source_name(&self) -> &'static str {
+            self.0.name
+        }
+        async fn search(&self, _q: &str) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
+        async fn get_series(&self, url: &str) -> Result<SeriesData> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let s = &self.0;
+            let n = s.in_flight.fetch_add(1, SeqCst) + 1;
+            s.max_in_flight.fetch_max(n, SeqCst);
+            let first = {
+                let mut calls = s.calls.lock().unwrap();
+                calls.push(url.to_string());
+                calls.len() == 1
+            };
+            if first {
+                s.meet.wait().await;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            s.in_flight.fetch_sub(1, SeqCst);
+            if url.ends_with("/fail") {
+                return Err(anyhow::anyhow!("HTTP 500"));
+            }
+            // One chapter more than the library has: always "new".
+            Ok(series(2, url))
+        }
+        async fn get_chapter_image_urls(&self, _url: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_poll_concurrently_each_in_list_order() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("skipped: MRM_TEST_DATABASE_URL unset");
+            return;
+        };
+        // Interleaved in the library, as sources usually are.
+        for (src, url) in [
+            ("a", "https://a/1"),
+            ("b", "https://b/1"),
+            ("a", "https://a/fail"),
+            ("b", "https://b/2"),
+            ("a", "https://a/2"),
+            ("gone", "https://gone/1"),
+        ] {
+            db::insert_manhwa_with_chapters(&pool, &series(1, url), src)
+                .await
+                .unwrap();
+        }
+        db::set_discovery_meta(&pool, DISCOVERY_META_KEY, &Utc::now().to_rfc3339())
+            .await
+            .unwrap();
+        let list = db::fetch_all_manhwa(&pool).await.unwrap();
+
+        let meet = Arc::new(tokio::sync::Barrier::new(2));
+        let a = RecordingScraper::new("a", meet.clone());
+        let b = RecordingScraper::new("b", meet);
+        let mut reg: Registry = Registry::new();
+        reg.insert("a", Box::new(Shared(a.clone())));
+        reg.insert("b", Box::new(Shared(b.clone())));
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_all(
+                &pool,
+                &test_config(),
+                &reg,
+                &CancellationToken::new(),
+                &tx,
+                true,
+            ),
+        )
+        .await
+        .expect("sources were polled one after another")
+        .unwrap();
+
+        for (src, s) in [("a", &a), ("b", &b)] {
+            let want: Vec<String> = list
+                .iter()
+                .filter(|m| m.source == src)
+                .map(|m| m.source_url.clone())
+                .collect();
+            assert_eq!(*s.calls.lock().unwrap(), want, "{src}: list order");
+            assert_eq!(
+                s.max_in_flight.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{src}: one request at a time"
+            );
+        }
+
+        // Same titles, same order as the sequential poll would report.
+        let want: Vec<String> = list
+            .iter()
+            .filter(|m| m.source != "gone" && !m.source_url.ends_with("/fail"))
+            .map(|m| m.title.clone())
+            .collect();
+        match rx.try_recv() {
+            Ok(ScraperEvent::NewChapters { titles }) => assert_eq!(titles, want),
+            other => panic!("no reload event: {other:?}"),
+        }
+        let failing: Vec<_> = db::fetch_all_manhwa(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.failing_since.is_some())
+            .map(|m| m.source_url)
+            .collect();
+        assert_eq!(failing, vec!["https://a/fail".to_string()]);
     }
 
     #[tokio::test]
