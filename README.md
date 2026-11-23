@@ -1,6 +1,16 @@
 # mrm - Manhwa Reader Manager
 
-A terminal-based manhwa/manga reader and library manager built in Rust. Tracks reading progress, auto-classifies status based on reading behavior, scrapes sources for new chapters, and sends desktop notifications when new releases drop.
+[![CI](https://github.com/Lucasldab/mrm/actions/workflows/ci.yml/badge.svg)](https://github.com/Lucasldab/mrm/actions/workflows/ci.yml)
+
+A terminal manhwa/manga reader and library manager in Rust. It tracks reading progress, sets each series' status from how you read it, checks sources for new chapters and notifies you when they drop. One PostgreSQL library is shared by every machine you read on.
+
+## Highlights
+
+- **One library, several machines, one notification per chapter.** Laptops and a home server share a Postgres database. New chapters are claimed for notification in a single row-locked `UPDATE`, so a chapter is announced once even when several pollers find it at the same time. The claim comes before the push, so delivery is at-most-once by design.
+- **Upgrades never break the machines you have not updated yet.** Migrations only add tables, columns and indexes, and older binaries ignore migrations they do not know, so a laptop on last month's build keeps working after the server migrates.
+- **A Cloudflare-fronted source without a headless browser.** Cloudflare rejects clients whose TLS handshake does not look like a browser's. mrm uses [rquest](https://crates.io/crates/rquest), which reproduces Chrome's TLS and HTTP/2 fingerprint in-process. This replaced an earlier Python `curl_cffi` subprocess.
+- **A small API for a phone app.** `mrm --serve` serves the library to [mrm-phone](https://github.com/Lucasldab/mrm-phone), with bearer-token auth. Ids in request paths are parsed as integers only and cache paths are built from those integers, so no request can name a file on disk.
+- **Nearly 200 tests, including the database code.** CI checks formatting, runs clippy with warnings as errors, and runs the tests against a throwaway Postgres cluster it starts itself.
 
 ## Features
 
@@ -16,11 +26,11 @@ A terminal-based manhwa/manga reader and library manager built in Rust. Tracks r
 
 - [MangaDex](https://mangadex.org) (REST API)
 - [MangaCK](https://mangack.com) (HTML scraping)
-- [AsuraScans](https://asurascans.com) (Python scraper; skips early-access/paywalled chapters until they unlock)
+- [AsuraScans](https://asurascans.com) (HTML scraping behind Cloudflare, see above; skips early-access/paywalled chapters until they unlock)
 
 ## Requirements
 
-- Rust 1.88+ (the highest `rust-version` declared by the direct dependencies I checked: ratatui 0.30 = 1.88, ratatui-image = 1.86, rquest 5 = 1.85; sqlx 0.8 declares none; transitive crates not exhaustively checked)
+- Rust 1.88 or newer (CI builds on current stable)
 - PostgreSQL 14+ (see [Database](#database))
 - cmake and clang (see [Build dependencies](#build-dependencies))
 - Linux with a terminal that supports images (kitty, iTerm2, etc.)
@@ -119,6 +129,10 @@ mrm --daemon
 
 # Poll once and exit
 mrm --once
+
+# Serve the JSON API for mrm-phone (MRM_SERVE_ADDR, default 127.0.0.1:8102;
+# token in ~/.config/mrm/serve_token, which must not be group/world-readable)
+mrm --serve
 
 # Add series in bulk: one `title<TAB>last chapter read` per line
 mrm --import list.tsv --dry-run   # show matches, write nothing
